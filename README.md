@@ -17,6 +17,28 @@ This repository contains the code for our paper *Generating Synergistic Formulai
 - `/gplearn` and `/dso` contains modified versions of our baselines;
 - `/scripts` contains several scripts for running the experiments.
 
+## Quick Start
+
+Create and activate a local virtual environment first:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt pytest
+```
+
+Run the local regression tests with:
+
+```bash
+python -m pytest -q
+```
+
+Notes on dependencies:
+
+- `requirements.txt` targets the main AlphaGen runtime on a modern Python environment.
+- The vendored `dso/` baseline still depends on an older TensorFlow-based stack declared separately in `dso/setup.py`.
+
 ## Result Reproduction
 
 Note that you can either use our builtin alpha calculation pipeline (see Choice 1), or implement an adapter to your own pipeline (see Choice 2).
@@ -71,7 +93,8 @@ Reminder: the values evaluated from different alphas may have drastically differ
 
 ### Before running
 
-All principle components of our expriment are located in [train_maskable_ppo.py](train_maskable_ppo.py).
+The current RL entrypoint is [scripts/rl.py](scripts/rl.py), not `train_maskable_ppo.py`.
+The scripts under `scripts/` are the most up-to-date entrypoints in this repository.
 
 These parameters may help you build an `AlphaCalculator`:
 
@@ -87,10 +110,21 @@ These parameters will define a RL run:
 - save_path (Path for checkpoints)
 - tensorboard_log (Path for TensorBoard)
 
+Practical runtime notes from the current code:
+
+- The Qlib provider URI defaults to `~/.qlib/qlib_data/cn_data`.
+- Several code paths still default to `torch.device("cuda:0")`, so CPU-only runs may require passing a different device or editing the script.
+- `scripts/rl.py` and `scripts/llm_only.py` use `fire.Fire(...)`, so they should be launched directly as scripts from the repository root.
+
 ### Run the experiments
 
-Please run the individual scripts at the root directory of this project as modules, i.e. `python -m scripts.NAME ARGS...`.
-Use `python -m scripts.NAME -h` for information on the arguments.
+From the repository root, run the experiment entrypoints directly:
+
+```bash
+python scripts/rl.py --help
+python scripts/llm_only.py --help
+python scripts/llm_test_validity.py --help
+```
 
 - `scripts/rl.py`: Main experiments of AlphaGen/HARLA
 - `scripts/llm_only.py`: Alpha generator based solely on iterative interactions with an LLM.
@@ -112,6 +146,8 @@ Use `python -m scripts.NAME -h` for information on the arguments.
 ### Deep Symbolic Regression
 
 [DSO](https://github.com/brendenpetersen/deep-symbolic-optimization) is a mature deep learning framework for symbolic optimization tasks. We maintained a minimal version of DSO to make it compatiable with our task. The corresponding experiment scipt is [dso.py](dso.py)
+
+Note that this baseline is tied to the legacy dependency set in `dso/setup.py`, not the main project `requirements.txt`.
 
 ## Trading (Experimental)
 
