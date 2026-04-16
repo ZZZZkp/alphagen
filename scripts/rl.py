@@ -1,27 +1,108 @@
 import json
 import os
-from typing import Optional, Tuple, List
+import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from openai import OpenAI
-import fire
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+import fire
 import numpy as np
+import torch
+from openai import OpenAI
 from sb3_contrib.ppo_mask import MaskablePPO
 from stable_baselines3.common.callbacks import BaseCallback
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from alphagen.data.expression import *
 from alphagen.data.parser import ExpressionParser
 from alphagen.models.linear_alpha_pool import LinearAlphaPool, MseAlphaPool
+from alphagen.rl.env.core import AlphaEnvCore
 from alphagen.rl.env.wrapper import AlphaEnv
 from alphagen.rl.policy import LSTMSharedNet
-from alphagen.utils import reseed_everything, get_logger
-from alphagen.rl.env.core import AlphaEnvCore
+from alphagen.utils import get_logger, reseed_everything
 from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.stock_data import initialize_qlib
-from alphagen_llm.client import ChatClient, OpenAIClient, ChatConfig
+from alphagen_llm.client import ChatClient, ChatConfig, OpenAIClient
+from alphagen_llm.prompts.interaction import DefaultInteraction, InterativeSession
 from alphagen_llm.prompts.system_prompt import EXPLAIN_WITH_TEXT_DESC
-from alphagen_llm.prompts.interaction import InterativeSession, DefaultInteraction
+
+
+DEFAULT_SEGMENTS: Tuple[Tuple[str, str], ...] = (
+    ("2012-01-01", "2021-12-31"),
+    ("2022-01-01", "2022-06-30"),
+    ("2022-07-01", "2022-12-31"),
+    ("2023-01-01", "2023-06-30"),
+)
+
+DEFAULT_STEPS: Dict[int, int] = {
+    10: 200_000,
+    20: 250_000,
+    50: 300_000,
+    100: 350_000,
+}
+
+LOCAL_STEPS: Dict[int, int] = {
+    10: 20_000,
+    20: 35_000,
+    50: 50_000,
+    100: 75_000,
+}
+
+
+@dataclass(frozen=True)
+class RLProfile:
+    name: str
+    description: str
+    qlib_candidates: Tuple[str, ...]
+    default_pool_capacity: int
+    default_steps: Dict[int, int]
+    prefer_cuda: bool = False
+    prefer_mps: bool = False
+    segments: Tuple[Tuple[str, str], ...] = DEFAULT_SEGMENTS
+
+
+PROFILES: Dict[str, RLProfile] = {
+    "default": RLProfile(
+        name="default",
+        description="Repository defaults with automatic device and data-path selection.",
+        qlib_candidates=(
+            "~/.qlib/qlib_data/cn_data",
+            "~/.qlib/qlib_data/cn_data_2024h1",
+        ),
+        default_pool_capacity=20,
+        default_steps=DEFAULT_STEPS,
+    ),
+    "local": RLProfile(
+        name="local",
+        description="Laptop-friendly defaults for local iteration on Apple Silicon or CPU.",
+        qlib_candidates=(
+            "~/.qlib/qlib_data/cn_data_2024h1",
+            "~/.qlib/qlib_data/cn_data",
+        ),
+        default_pool_capacity=10,
+        default_steps=LOCAL_STEPS,
+        prefer_mps=True,
+    ),
+    "colab": RLProfile(
+        name="colab",
+        description="Colab-oriented defaults with CUDA-first device selection and broader path probing.",
+        qlib_candidates=(
+            "/content/qlib_data/cn_data_2024h1",
+            "/content/qlib_data/cn_data",
+            "/content/drive/MyDrive/qlib_data/cn_data_2024h1",
+            "/content/drive/MyDrive/qlib_data/cn_data",
+            "~/.qlib/qlib_data/cn_data_2024h1",
+            "~/.qlib/qlib_data/cn_data",
+        ),
+        default_pool_capacity=20,
+        default_steps=DEFAULT_STEPS,
+        prefer_cuda=True,
+    ),
+}
 
 
 def read_alphagpt_init_pool(seed: int) -> List[Expression]:
@@ -57,6 +138,78 @@ def build_chat_client(log_dir: str) -> ChatClient:
             logger=logger
         )
     )
+
+
+def get_profile(name: str = "default") -> RLProfile:
+    if name not in PROFILES:
+        supported = ", ".join(sorted(PROFILES))
+        raise ValueError(f"Unknown RL profile '{name}'. Supported profiles: {supported}")
+    return PROFILES[name]
+
+
+def list_profiles() -> Dict[str, Dict[str, Union[str, int, List[str]]]]:
+    return {
+        name: {
+            "description": profile.description,
+            "default_pool_capacity": profile.default_pool_capacity,
+            "default_steps": dict(profile.default_steps),
+            "qlib_candidates": list(profile.qlib_candidates),
+        }
+        for name, profile in PROFILES.items()
+    }
+
+
+def _mps_available() -> bool:
+    return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+
+def resolve_device(device: Optional[str], profile: RLProfile) -> torch.device:
+    if device is not None:
+        return torch.device(device)
+    if profile.prefer_cuda and torch.cuda.is_available():
+        return torch.device("cuda:0")
+    if profile.prefer_mps and _mps_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    if _mps_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def resolve_qlib_data_path(qlib_data_path: Optional[str], profile: RLProfile) -> str:
+    if qlib_data_path is not None:
+        return os.path.expanduser(qlib_data_path)
+    for candidate in profile.qlib_candidates:
+        expanded = os.path.expanduser(candidate)
+        if Path(expanded).exists():
+            return expanded
+    return os.path.expanduser(profile.qlib_candidates[0])
+
+
+def validate_qlib_calendar(qlib_data_path: str, segments: Sequence[Tuple[str, str]]) -> None:
+    calendar_path = Path(qlib_data_path).expanduser() / "calendars" / "day.txt"
+    if not calendar_path.exists():
+        return
+    first, last = None, None
+    with open(calendar_path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if line == "":
+                continue
+            if first is None:
+                first = line
+            last = line
+    if first is None or last is None:
+        return
+    earliest = min(start for start, _ in segments)
+    latest = max(end for _, end in segments)
+    if first > earliest or last < latest:
+        raise ValueError(
+            "The selected Qlib dataset does not cover the requested training/test segments: "
+            f"calendar range [{first}, {last}], required [{earliest}, {latest}]. "
+            "Pass a different --qlib_data_path or use another profile."
+        )
 
 
 class CustomCallback(BaseCallback):
@@ -164,10 +317,13 @@ def run_single_experiment(
     use_llm: bool = False,
     llm_every_n_steps: int = 25_000,
     drop_rl_n: int = 5,
-    llm_replace_n: int = 3
+    llm_replace_n: int = 3,
+    qlib_data_path: str = "~/.qlib/qlib_data/cn_data",
+    device: Optional[torch.device] = None,
+    segments: Sequence[Tuple[str, str]] = DEFAULT_SEGMENTS,
 ):
     reseed_everything(seed)
-    initialize_qlib("~/.qlib/qlib_data/cn_data")
+    initialize_qlib(qlib_data_path)
 
     llm_replace_n = 0 if not use_llm else llm_replace_n
     print(f"""[Main] Starting training process
@@ -179,7 +335,9 @@ def run_single_experiment(
     Use LLM: {use_llm}
     Invoke LLM every N steps: {llm_every_n_steps}
     Replace N alphas with LLM: {llm_replace_n}
-    Drop N alphas before LLM: {drop_rl_n}""")
+    Drop N alphas before LLM: {drop_rl_n}
+    Qlib data path: {qlib_data_path}
+    Device: {device or 'auto'}""")
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     # tag = "rlv2" if llm_add_subexpr == 0 else f"afs{llm_add_subexpr}aar1-5"
@@ -191,7 +349,7 @@ def run_single_experiment(
     save_path = os.path.join("./out/results", name_prefix)
     os.makedirs(save_path, exist_ok=True)
 
-    device = torch.device("cuda:0")
+    device = device or torch.device("cpu")
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
@@ -203,12 +361,6 @@ def run_single_experiment(
             device=device
         )
 
-    segments = [
-        ("2012-01-01", "2021-12-31"),
-        ("2022-01-01", "2022-06-30"),
-        ("2022-07-01", "2022-12-31"),
-        ("2023-01-01", "2023-06-30")
-    ]
     datasets = [get_dataset(*s) for s in segments]
     calculators = [QLibStockDataCalculator(d, target) for d in datasets]
 
@@ -277,13 +429,16 @@ def run_single_experiment(
 
 def main(
     random_seeds: Union[int, Tuple[int]] = 0,
-    pool_capacity: int = 20,
+    pool_capacity: Optional[int] = None,
     instruments: str = "csi300",
     alphagpt_init: bool = False,
     use_llm: bool = False,
     drop_rl_n: int = 10,
     steps: Optional[int] = None,
-    llm_every_n_steps: int = 25000
+    llm_every_n_steps: int = 25000,
+    profile: str = "default",
+    device: Optional[str] = None,
+    qlib_data_path: Optional[str] = None,
 ):
     """
     :param random_seeds: Random seeds
@@ -294,27 +449,101 @@ def main(
     :param drop_rl_n: Drop n worst alphas before invoke the LLM
     :param steps: Total iteration steps
     :param llm_every_n_steps: Invoke LLM every n steps
+    :param profile: Runtime profile name. Supported: default, local, colab
+    :param device: Optional PyTorch device string, e.g. cpu, mps, cuda:0
+    :param qlib_data_path: Optional Qlib data directory override
     """
+    rl_profile = get_profile(profile)
+    selected_pool_capacity = rl_profile.default_pool_capacity if pool_capacity is None else int(pool_capacity)
+    selected_steps = rl_profile.default_steps
+    resolved_device = resolve_device(device, rl_profile)
+    resolved_qlib_data_path = resolve_qlib_data_path(qlib_data_path, rl_profile)
+    validate_qlib_calendar(resolved_qlib_data_path, rl_profile.segments)
+    if steps is None and selected_pool_capacity not in selected_steps:
+        supported = ", ".join(str(k) for k in sorted(selected_steps))
+        raise ValueError(
+            f"Pool capacity {selected_pool_capacity} has no default step count in profile "
+            f"'{rl_profile.name}'. Supported capacities: {supported}. Pass --steps explicitly."
+        )
+
     if isinstance(random_seeds, int):
         random_seeds = (random_seeds, )
-    default_steps = {
-        10: 200_000,
-        20: 250_000,
-        50: 300_000,
-        100: 350_000
-    }
     for s in random_seeds:
         run_single_experiment(
             seed=s,
             instruments=instruments,
-            pool_capacity=pool_capacity,
-            steps=default_steps[int(pool_capacity)] if steps is None else int(steps),
+            pool_capacity=selected_pool_capacity,
+            steps=selected_steps[int(selected_pool_capacity)] if steps is None else int(steps),
             alphagpt_init=alphagpt_init,
             drop_rl_n=drop_rl_n,
             use_llm=use_llm,
-            llm_every_n_steps=llm_every_n_steps
+            llm_every_n_steps=llm_every_n_steps,
+            qlib_data_path=resolved_qlib_data_path,
+            device=resolved_device,
+            segments=rl_profile.segments,
         )
 
 
+def local(
+    random_seeds: Union[int, Tuple[int]] = 0,
+    pool_capacity: Optional[int] = None,
+    instruments: str = "csi300",
+    alphagpt_init: bool = False,
+    use_llm: bool = False,
+    drop_rl_n: int = 10,
+    steps: Optional[int] = None,
+    llm_every_n_steps: int = 25000,
+    device: Optional[str] = None,
+    qlib_data_path: Optional[str] = None,
+):
+    return main(
+        random_seeds=random_seeds,
+        pool_capacity=pool_capacity,
+        instruments=instruments,
+        alphagpt_init=alphagpt_init,
+        use_llm=use_llm,
+        drop_rl_n=drop_rl_n,
+        steps=steps,
+        llm_every_n_steps=llm_every_n_steps,
+        profile="local",
+        device=device,
+        qlib_data_path=qlib_data_path,
+    )
+
+
+def colab(
+    random_seeds: Union[int, Tuple[int]] = 0,
+    pool_capacity: Optional[int] = None,
+    instruments: str = "csi300",
+    alphagpt_init: bool = False,
+    use_llm: bool = False,
+    drop_rl_n: int = 10,
+    steps: Optional[int] = None,
+    llm_every_n_steps: int = 25000,
+    device: Optional[str] = None,
+    qlib_data_path: Optional[str] = None,
+):
+    return main(
+        random_seeds=random_seeds,
+        pool_capacity=pool_capacity,
+        instruments=instruments,
+        alphagpt_init=alphagpt_init,
+        use_llm=use_llm,
+        drop_rl_n=drop_rl_n,
+        steps=steps,
+        llm_every_n_steps=llm_every_n_steps,
+        profile="colab",
+        device=device,
+        qlib_data_path=qlib_data_path,
+    )
+
+
 if __name__ == '__main__':
-    fire.Fire(main)
+    fire.Fire(
+        {
+            "main": main,
+            "local": local,
+            "colab": colab,
+            "profiles": list_profiles,
+        }
+    )
