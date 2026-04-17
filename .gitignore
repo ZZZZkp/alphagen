@@ -1,5 +1,7 @@
 __pycache__
 .venv/
+.agents/
+AGENTS.md
 .idea/
 .vscode/
 .DS_STORE

@@ -49,3 +49,21 @@ def test_local_profile_uses_laptop_friendly_defaults(monkeypatch: pytest.MonkeyP
     assert captured["steps"] == rl.LOCAL_STEPS[rl.PROFILES["local"].default_pool_capacity]
     assert captured["device"] == "cpu"
     assert captured["qlib_data_path"] == "/tmp/qlib"
+    assert captured["ppo_n_steps"] == 128
+    assert captured["batch_size"] == 64
+    assert captured["print_expr"] is False
+
+
+def test_resolve_tensorboard_log_returns_none_when_tensorboard_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rl, "find_spec", lambda name: None)
+
+    assert rl.resolve_tensorboard_log() is None
+
+
+def test_main_rejects_batch_size_larger_than_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rl, "resolve_device", lambda device, profile: "cpu")
+    monkeypatch.setattr(rl, "resolve_qlib_data_path", lambda path, profile: "/tmp/qlib")
+    monkeypatch.setattr(rl, "validate_qlib_calendar", lambda path, segments: None)
+
+    with pytest.raises(ValueError, match="batch_size"):
+        rl.main(profile="local", pool_capacity=10, ppo_n_steps=32, batch_size=64)

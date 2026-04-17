@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from importlib.util import find_spec
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,12 @@ DEFAULT_SEGMENTS: Tuple[Tuple[str, str], ...] = (
     ("2023-01-01", "2023-06-30"),
 )
 
+LOCAL_SMOKE_SEGMENTS: Tuple[Tuple[str, str], ...] = (
+    ("2019-01-01", "2020-12-31"),
+    ("2021-01-01", "2021-06-30"),
+    ("2021-07-01", "2021-12-31"),
+)
+
 DEFAULT_STEPS: Dict[int, int] = {
     10: 200_000,
     20: 250_000,
@@ -52,6 +59,12 @@ LOCAL_STEPS: Dict[int, int] = {
     100: 75_000,
 }
 
+LOCAL_SMOKE_STEPS: Dict[int, int] = {
+    5: 64,
+    10: 128,
+    20: 256,
+}
+
 
 @dataclass(frozen=True)
 class RLProfile:
@@ -63,6 +76,9 @@ class RLProfile:
     prefer_cuda: bool = False
     prefer_mps: bool = False
     segments: Tuple[Tuple[str, str], ...] = DEFAULT_SEGMENTS
+    default_ppo_n_steps: int = 2048
+    default_batch_size: int = 128
+    print_expr: bool = True
 
 
 PROFILES: Dict[str, RLProfile] = {
@@ -86,6 +102,24 @@ PROFILES: Dict[str, RLProfile] = {
         default_pool_capacity=10,
         default_steps=LOCAL_STEPS,
         prefer_mps=True,
+        default_ppo_n_steps=128,
+        default_batch_size=64,
+        print_expr=False,
+    ),
+    "local-smoke": RLProfile(
+        name="local-smoke",
+        description="Very small local sanity-check profile for Macs and CPU-only runs.",
+        qlib_candidates=(
+            "~/.qlib/qlib_data/cn_data_2024h1",
+            "~/.qlib/qlib_data/cn_data",
+        ),
+        default_pool_capacity=5,
+        default_steps=LOCAL_SMOKE_STEPS,
+        prefer_mps=True,
+        segments=LOCAL_SMOKE_SEGMENTS,
+        default_ppo_n_steps=64,
+        default_batch_size=32,
+        print_expr=False,
     ),
     "colab": RLProfile(
         name="colab",
@@ -101,6 +135,8 @@ PROFILES: Dict[str, RLProfile] = {
         default_pool_capacity=20,
         default_steps=DEFAULT_STEPS,
         prefer_cuda=True,
+        default_ppo_n_steps=2048,
+        default_batch_size=128,
     ),
 }
 
@@ -154,6 +190,8 @@ def list_profiles() -> Dict[str, Dict[str, Union[str, int, List[str]]]]:
             "default_pool_capacity": profile.default_pool_capacity,
             "default_steps": dict(profile.default_steps),
             "qlib_candidates": list(profile.qlib_candidates),
+            "default_ppo_n_steps": profile.default_ppo_n_steps,
+            "default_batch_size": profile.default_batch_size,
         }
         for name, profile in PROFILES.items()
     }
@@ -210,6 +248,12 @@ def validate_qlib_calendar(qlib_data_path: str, segments: Sequence[Tuple[str, st
             f"calendar range [{first}, {last}], required [{earliest}, {latest}]. "
             "Pass a different --qlib_data_path or use another profile."
         )
+
+
+def resolve_tensorboard_log(default_path: str = "./out/tensorboard") -> Optional[str]:
+    if find_spec("tensorboard") is None:
+        return None
+    return default_path
 
 
 class CustomCallback(BaseCallback):
@@ -321,6 +365,9 @@ def run_single_experiment(
     qlib_data_path: str = "~/.qlib/qlib_data/cn_data",
     device: Optional[torch.device] = None,
     segments: Sequence[Tuple[str, str]] = DEFAULT_SEGMENTS,
+    ppo_n_steps: int = 2048,
+    batch_size: int = 128,
+    print_expr: bool = True,
 ):
     reseed_everything(seed)
     initialize_qlib(qlib_data_path)
@@ -391,7 +438,7 @@ def run_single_experiment(
     env = AlphaEnv(
         pool=pool,
         device=device,
-        print_expr=True
+        print_expr=print_expr
     )
     checkpoint_callback = CustomCallback(
         save_path=save_path,
@@ -415,8 +462,9 @@ def run_single_experiment(
         ),
         gamma=1.,
         ent_coef=0.01,
-        batch_size=128,
-        tensorboard_log="./out/tensorboard",
+        n_steps=ppo_n_steps,
+        batch_size=batch_size,
+        tensorboard_log=resolve_tensorboard_log(),
         device=device,
         verbose=1,
     )
@@ -439,6 +487,9 @@ def main(
     profile: str = "default",
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    ppo_n_steps: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    print_expr: Optional[bool] = None,
 ):
     """
     :param random_seeds: Random seeds
@@ -449,9 +500,12 @@ def main(
     :param drop_rl_n: Drop n worst alphas before invoke the LLM
     :param steps: Total iteration steps
     :param llm_every_n_steps: Invoke LLM every n steps
-    :param profile: Runtime profile name. Supported: default, local, colab
+    :param profile: Runtime profile name. Supported: default, local, local-smoke, colab
     :param device: Optional PyTorch device string, e.g. cpu, mps, cuda:0
     :param qlib_data_path: Optional Qlib data directory override
+    :param ppo_n_steps: PPO rollout length before each optimization phase
+    :param batch_size: PPO minibatch size
+    :param print_expr: Whether to print each generated expression
     """
     rl_profile = get_profile(profile)
     selected_pool_capacity = rl_profile.default_pool_capacity if pool_capacity is None else int(pool_capacity)
@@ -459,11 +513,19 @@ def main(
     resolved_device = resolve_device(device, rl_profile)
     resolved_qlib_data_path = resolve_qlib_data_path(qlib_data_path, rl_profile)
     validate_qlib_calendar(resolved_qlib_data_path, rl_profile.segments)
+    resolved_ppo_n_steps = rl_profile.default_ppo_n_steps if ppo_n_steps is None else int(ppo_n_steps)
+    resolved_batch_size = rl_profile.default_batch_size if batch_size is None else int(batch_size)
+    resolved_print_expr = rl_profile.print_expr if print_expr is None else bool(print_expr)
     if steps is None and selected_pool_capacity not in selected_steps:
         supported = ", ".join(str(k) for k in sorted(selected_steps))
         raise ValueError(
             f"Pool capacity {selected_pool_capacity} has no default step count in profile "
             f"'{rl_profile.name}'. Supported capacities: {supported}. Pass --steps explicitly."
+        )
+    if resolved_batch_size > resolved_ppo_n_steps:
+        raise ValueError(
+            f"batch_size ({resolved_batch_size}) must be <= ppo_n_steps ({resolved_ppo_n_steps}) "
+            "for stable local runs. Pass a smaller --batch_size or larger --ppo_n_steps."
         )
 
     if isinstance(random_seeds, int):
@@ -481,6 +543,9 @@ def main(
             qlib_data_path=resolved_qlib_data_path,
             device=resolved_device,
             segments=rl_profile.segments,
+            ppo_n_steps=resolved_ppo_n_steps,
+            batch_size=resolved_batch_size,
+            print_expr=resolved_print_expr,
         )
 
 
@@ -495,6 +560,9 @@ def local(
     llm_every_n_steps: int = 25000,
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    ppo_n_steps: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    print_expr: Optional[bool] = None,
 ):
     return main(
         random_seeds=random_seeds,
@@ -508,6 +576,42 @@ def local(
         profile="local",
         device=device,
         qlib_data_path=qlib_data_path,
+        ppo_n_steps=ppo_n_steps,
+        batch_size=batch_size,
+        print_expr=print_expr,
+    )
+
+
+def local_smoke(
+    random_seeds: Union[int, Tuple[int]] = 0,
+    pool_capacity: Optional[int] = None,
+    instruments: str = "csi300",
+    alphagpt_init: bool = False,
+    use_llm: bool = False,
+    drop_rl_n: int = 10,
+    steps: Optional[int] = None,
+    llm_every_n_steps: int = 25000,
+    device: Optional[str] = None,
+    qlib_data_path: Optional[str] = None,
+    ppo_n_steps: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    print_expr: Optional[bool] = None,
+):
+    return main(
+        random_seeds=random_seeds,
+        pool_capacity=pool_capacity,
+        instruments=instruments,
+        alphagpt_init=alphagpt_init,
+        use_llm=use_llm,
+        drop_rl_n=drop_rl_n,
+        steps=steps,
+        llm_every_n_steps=llm_every_n_steps,
+        profile="local-smoke",
+        device=device,
+        qlib_data_path=qlib_data_path,
+        ppo_n_steps=ppo_n_steps,
+        batch_size=batch_size,
+        print_expr=print_expr,
     )
 
 
@@ -522,6 +626,9 @@ def colab(
     llm_every_n_steps: int = 25000,
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    ppo_n_steps: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    print_expr: Optional[bool] = None,
 ):
     return main(
         random_seeds=random_seeds,
@@ -535,6 +642,9 @@ def colab(
         profile="colab",
         device=device,
         qlib_data_path=qlib_data_path,
+        ppo_n_steps=ppo_n_steps,
+        batch_size=batch_size,
+        print_expr=print_expr,
     )
 
 
@@ -543,6 +653,7 @@ if __name__ == '__main__':
         {
             "main": main,
             "local": local,
+            "local_smoke": local_smoke,
             "colab": colab,
             "profiles": list_profiles,
         }
