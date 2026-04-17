@@ -1,8 +1,18 @@
 from typing import Optional, List
 from logging import Logger
 from datetime import datetime
+from pathlib import Path
 import json
 from itertools import accumulate
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from alphagen.utils import configure_project_runtime
+
+configure_project_runtime(ROOT)
 
 import fire
 import torch

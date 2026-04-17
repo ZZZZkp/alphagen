@@ -2,6 +2,8 @@ from setuptools import setup
 import os
 from setuptools import dist
 
+# Legacy vendored DSO baseline: this package stays on the original TensorFlow 1.x
+# dependency line and is intentionally separate from the NumPy 2 runtime in ../requirements.txt.
 dist.Distribution().fetch_build_eggs(['Cython', 'numpy'])
 
 import numpy

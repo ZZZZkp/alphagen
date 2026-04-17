@@ -8,16 +8,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from alphagen.utils import configure_project_runtime
+
+configure_project_runtime(ROOT)
+
 import fire
 import numpy as np
 import torch
 from openai import OpenAI
 from sb3_contrib.ppo_mask import MaskablePPO
 from stable_baselines3.common.callbacks import BaseCallback
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from alphagen.data.expression import *
 from alphagen.data.parser import ExpressionParser

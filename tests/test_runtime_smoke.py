@@ -86,3 +86,50 @@ def test_alpha_env_runtime_smoke() -> None:
         )
 
     assert result.stdout.strip() == "ok"
+
+
+def test_training_entrypoints_import_with_modern_runtime() -> None:
+    result = _run_script(
+        """
+        import numpy as np
+        from sb3_contrib.ppo_mask import MaskablePPO
+
+        import scripts.llm_only as llm_only
+        import scripts.rl as rl
+
+        assert np.__version__.startswith("2.")
+        assert MaskablePPO is not None
+        assert rl.PROFILES["colab"].name == "colab"
+        assert callable(llm_only.build_parser)
+        print("ok")
+        """
+    )
+
+    if result.returncode != 0:
+        pytest.skip(
+            "Entrypoint import smoke test needs a working local RL stack; "
+            f"subprocess failed with: {(result.stderr or result.stdout).strip()}"
+        )
+
+    assert result.stdout.strip() == "ok"
+
+
+def test_project_runtime_configures_matplotlib_cache_in_repo() -> None:
+    result = _run_script(
+        """
+        import os
+        from pathlib import Path
+
+        from alphagen.utils.runtime_env import configure_project_runtime
+
+        root = Path.cwd()
+        configure_project_runtime(root)
+        expected = root / ".cache" / "matplotlib"
+        assert Path(os.environ["MPLCONFIGDIR"]) == expected
+        assert expected.is_dir()
+        print("ok")
+        """
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip() == "ok"

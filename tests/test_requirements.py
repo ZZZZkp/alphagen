@@ -37,12 +37,23 @@ def test_core_runtime_dependencies_are_declared() -> None:
     assert expected <= packages
 
 
+def test_numpy2_runtime_floor_is_declared() -> None:
+    text = REQUIREMENTS.read_text()
+
+    assert "numpy>=2.0.2,<3.0" in text
+    assert "pandas>=2.2,<3.0" in text
+    assert "scikit-learn>=1.5,<2.0" in text
+    assert "stable_baselines3>=2.8,<3.0" in text
+    assert "sb3_contrib>=2.8,<3.0" in text
+
+
 def test_legacy_dependency_pins_are_removed() -> None:
     text = REQUIREMENTS.read_text()
 
     for legacy_pin in (
         "gym==0.26.2",
         "numpy==1.20.1",
+        "numpy>=1.24,<2.0",
         "pandas==1.2.4",
         "matplotlib==3.3.4",
         "qlib==0.0.2.dev20",
