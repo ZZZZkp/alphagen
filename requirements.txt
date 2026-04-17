@@ -15,5 +15,6 @@ sb3_contrib>=2.3,<3.0
 scikit-learn>=1.3,<2.0
 shimmy>=1.3,<3.0
 stable_baselines3>=2.3,<3.0
+tensorboard>=2.20,<3.0
 tokentrim
 torch>=2.0,<3.0
