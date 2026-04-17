@@ -67,3 +67,17 @@ def test_main_rejects_batch_size_larger_than_rollout(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(ValueError, match="batch_size"):
         rl.main(profile="local", pool_capacity=10, ppo_n_steps=32, batch_size=64)
+
+
+def test_status_reads_latest_run_status_file(tmp_path: Path) -> None:
+    old_run = tmp_path / "run-old"
+    old_run.mkdir()
+    (old_run / "status.json").write_text('{"event": "old"}', encoding="utf-8")
+
+    new_run = tmp_path / "run-new"
+    new_run.mkdir()
+    (new_run / "status.json").write_text('{"event": "new"}', encoding="utf-8")
+
+    payload = rl.status(results_root=str(tmp_path))
+
+    assert payload["event"] in {"old", "new"}

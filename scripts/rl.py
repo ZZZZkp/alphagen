@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from importlib.util import find_spec
 from dataclasses import dataclass
 from datetime import datetime
@@ -256,6 +257,34 @@ def resolve_tensorboard_log(default_path: str = "./out/tensorboard") -> Optional
     return default_path
 
 
+def _write_json(path: str, payload: Dict[str, object]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def latest_run(results_root: str = "./out/results") -> Optional[str]:
+    root = Path(results_root)
+    if not root.exists():
+        return None
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return str(max(dirs, key=lambda p: p.stat().st_mtime))
+
+
+def status(run_dir: Optional[str] = None, results_root: str = "./out/results") -> Dict[str, object]:
+    chosen = latest_run(results_root) if run_dir is None else run_dir
+    if chosen is None:
+        raise ValueError(f"No run directory found under {results_root}")
+    status_path = Path(chosen) / "status.json"
+    if not status_path.exists():
+        raise ValueError(f"No status.json found in {chosen}")
+    with open(status_path, encoding="utf-8") as f:
+        payload = json.load(f)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return payload
+
+
 class CustomCallback(BaseCallback):
     def __init__(
         self,
@@ -264,12 +293,16 @@ class CustomCallback(BaseCallback):
         verbose: int = 0,
         chat_session: Optional[InterativeSession] = None,
         llm_every_n_steps: int = 25_000,
-        drop_rl_n: int = 5
+        drop_rl_n: int = 5,
+        heartbeat_every_n_steps: int = 32,
+        heartbeat_every_seconds: float = 10.0,
     ):
         super().__init__(verbose)
         self.save_path = save_path
         self.test_calculators = test_calculators
         os.makedirs(self.save_path, exist_ok=True)
+        self._status_path = os.path.join(self.save_path, "status.json")
+        self._monitor_log_path = os.path.join(self.save_path, "monitor.log")
 
         self.llm_use_count = 0
         self.last_llm_use = 0
@@ -277,9 +310,24 @@ class CustomCallback(BaseCallback):
         self.llm_every_n_steps = llm_every_n_steps
         self.chat_session = chat_session
         self._drop_rl_n = drop_rl_n
+        self._heartbeat_every_n_steps = heartbeat_every_n_steps
+        self._heartbeat_every_seconds = heartbeat_every_seconds
+        self._last_heartbeat_step = 0
+        self._last_heartbeat_time = time.time()
+        self._started_at = time.time()
 
     def _on_step(self) -> bool:
+        now = time.time()
+        step_delta = self.num_timesteps - self._last_heartbeat_step
+        time_delta = now - self._last_heartbeat_time
+        if step_delta >= self._heartbeat_every_n_steps or time_delta >= self._heartbeat_every_seconds:
+            self._write_status("heartbeat")
+            self._last_heartbeat_step = self.num_timesteps
+            self._last_heartbeat_time = now
         return True
+
+    def _on_training_start(self) -> None:
+        self._write_status("training_start")
 
     def _on_rollout_end(self) -> None:
         if self.chat_session is not None:
@@ -300,6 +348,14 @@ class CustomCallback(BaseCallback):
         self.logger.record(f'test/ic_mean', ic_test_mean)
         self.logger.record(f'test/rank_ic_mean', rank_ic_test_mean)
         self.save_checkpoint()
+        self._write_status(
+            "rollout_end",
+            test_ic_mean=ic_test_mean,
+            test_rank_ic_mean=rank_ic_test_mean,
+        )
+
+    def _on_training_end(self) -> None:
+        self._write_status("training_end")
 
     def save_checkpoint(self):
         path = os.path.join(self.save_path, f'{self.num_timesteps}_steps')
@@ -308,6 +364,7 @@ class CustomCallback(BaseCallback):
             print(f'Saving model checkpoint to {path}')
         with open(f'{path}_pool.json', 'w') as f:
             json.dump(self.pool.to_json_dict(), f)
+        self._append_monitor_log(f"checkpoint saved: {path}")
 
     def show_pool_state(self):
         state = self.pool.state
@@ -341,6 +398,30 @@ class CustomCallback(BaseCallback):
             self.chat_session.update_pool(self.pool)
         except Exception as e:
             logger.warning(f"LLM invocation failed due to {type(e)}: {str(e)}")
+
+    def _append_monitor_log(self, message: str) -> None:
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with open(self._monitor_log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+
+    def _write_status(self, event: str, **extra: object) -> None:
+        payload: Dict[str, object] = {
+            "event": event,
+            "save_path": self.save_path,
+            "num_timesteps": int(self.num_timesteps),
+            "pool_size": int(self.pool.size),
+            "pool_eval_cnt": int(self.pool.eval_cnt),
+            "pool_best_ic_ret": float(self.pool.best_ic_ret),
+            "significant_count": int((np.abs(self.pool.weights[:self.pool.size]) > 1e-4).sum()),
+            "elapsed_seconds": round(time.time() - self._started_at, 2),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        payload.update(extra)
+        _write_json(self._status_path, payload)
+        self._append_monitor_log(
+            f"{event}: steps={payload['num_timesteps']} pool={payload['pool_size']} "
+            f"evals={payload['pool_eval_cnt']} best_ic={payload['pool_best_ic_ret']:.4f}"
+        )
 
     @property
     def pool(self) -> LinearAlphaPool:
@@ -395,6 +476,39 @@ def run_single_experiment(
     name_prefix = f"{instruments}_{pool_capacity}_{seed}_{timestamp}_{tag}"
     save_path = os.path.join("./out/results", name_prefix)
     os.makedirs(save_path, exist_ok=True)
+    _write_json(
+        os.path.join(save_path, "run_config.json"),
+        {
+            "seed": seed,
+            "instruments": instruments,
+            "pool_capacity": pool_capacity,
+            "steps": steps,
+            "alphagpt_init": alphagpt_init,
+            "use_llm": use_llm,
+            "llm_every_n_steps": llm_every_n_steps,
+            "drop_rl_n": drop_rl_n,
+            "llm_replace_n": llm_replace_n,
+            "qlib_data_path": qlib_data_path,
+            "device": str(device or "auto"),
+            "segments": list(segments),
+            "ppo_n_steps": ppo_n_steps,
+            "batch_size": batch_size,
+            "print_expr": print_expr,
+        },
+    )
+    _write_json(
+        os.path.join(save_path, "status.json"),
+        {
+            "event": "created",
+            "save_path": save_path,
+            "num_timesteps": 0,
+            "pool_size": 0,
+            "pool_eval_cnt": 0,
+            "pool_best_ic_ret": -1.0,
+            "significant_count": 0,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
 
     device = device or torch.device("cpu")
     close = Feature(FeatureType.CLOSE)
@@ -656,5 +770,6 @@ if __name__ == '__main__':
             "local_smoke": local_smoke,
             "colab": colab,
             "profiles": list_profiles,
+            "status": status,
         }
     )
