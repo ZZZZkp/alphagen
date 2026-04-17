@@ -1,5 +1,7 @@
-from typing import List, Union, Optional, Tuple
+import os
 from enum import IntEnum
+from typing import List, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
 import torch
@@ -15,15 +17,51 @@ class FeatureType(IntEnum):
 
 
 _DEFAULT_QLIB_DATA_PATH = "~/.qlib/qlib_data/cn_data"
+_DEFAULT_QLIB_REGION = "cn"
 _QLIB_INITIALIZED = False
+_QLIB_PROVIDER_URI: Optional[str] = None
+_QLIB_REGION: Optional[str] = None
 
 
-def initialize_qlib(qlib_data_path: str = _DEFAULT_QLIB_DATA_PATH) -> None:
+def normalize_qlib_region(region: str = _DEFAULT_QLIB_REGION) -> str:
+    normalized = region.strip().lower()
+    aliases = {
+        "cn": "cn",
+        "reg_cn": "cn",
+        "china": "cn",
+        "us": "us",
+        "reg_us": "us",
+        "usa": "us",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unsupported Qlib region '{region}'. Supported regions: {', '.join(sorted(set(aliases.values())))}"
+        )
+    return aliases[normalized]
+
+
+def initialize_qlib(
+    qlib_data_path: str = _DEFAULT_QLIB_DATA_PATH,
+    region: str = _DEFAULT_QLIB_REGION,
+) -> None:
     import qlib
-    from qlib.config import REG_CN
-    qlib.init(provider_uri=qlib_data_path, region=REG_CN)
-    global _QLIB_INITIALIZED
+    from qlib.config import REG_CN, REG_US
+
+    global _QLIB_INITIALIZED, _QLIB_PROVIDER_URI, _QLIB_REGION
+    provider_uri = os.path.expanduser(qlib_data_path)
+    normalized_region = normalize_qlib_region(region)
+    if _QLIB_INITIALIZED:
+        if _QLIB_PROVIDER_URI == provider_uri and _QLIB_REGION == normalized_region:
+            return
+        raise RuntimeError(
+            "Qlib is already initialized with a different provider or region. "
+            f"Current=({_QLIB_PROVIDER_URI}, {_QLIB_REGION}), "
+            f"requested=({provider_uri}, {normalized_region}). Restart the runtime before switching."
+        )
+    qlib.init(provider_uri=provider_uri, region=REG_CN if normalized_region == "cn" else REG_US)
     _QLIB_INITIALIZED = True
+    _QLIB_PROVIDER_URI = provider_uri
+    _QLIB_REGION = normalized_region
 
 
 class StockData:

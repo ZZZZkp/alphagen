@@ -444,6 +444,7 @@ def run_single_experiment(
     drop_rl_n: int = 5,
     llm_replace_n: int = 3,
     qlib_data_path: str = "~/.qlib/qlib_data/cn_data",
+    qlib_region: str = "cn",
     device: Optional[torch.device] = None,
     segments: Sequence[Tuple[str, str]] = DEFAULT_SEGMENTS,
     ppo_n_steps: int = 2048,
@@ -451,7 +452,7 @@ def run_single_experiment(
     print_expr: bool = True,
 ):
     reseed_everything(seed)
-    initialize_qlib(qlib_data_path)
+    initialize_qlib(qlib_data_path, region=qlib_region)
 
     llm_replace_n = 0 if not use_llm else llm_replace_n
     print(f"""[Main] Starting training process
@@ -465,6 +466,7 @@ def run_single_experiment(
     Replace N alphas with LLM: {llm_replace_n}
     Drop N alphas before LLM: {drop_rl_n}
     Qlib data path: {qlib_data_path}
+    Qlib region: {qlib_region}
     Device: {device or 'auto'}""")
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -489,6 +491,7 @@ def run_single_experiment(
             "drop_rl_n": drop_rl_n,
             "llm_replace_n": llm_replace_n,
             "qlib_data_path": qlib_data_path,
+            "qlib_region": qlib_region,
             "device": str(device or "auto"),
             "segments": list(segments),
             "ppo_n_steps": ppo_n_steps,
@@ -601,6 +604,7 @@ def main(
     profile: str = "default",
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    qlib_region: str = "cn",
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
@@ -617,6 +621,7 @@ def main(
     :param profile: Runtime profile name. Supported: default, local, local-smoke, colab
     :param device: Optional PyTorch device string, e.g. cpu, mps, cuda:0
     :param qlib_data_path: Optional Qlib data directory override
+    :param qlib_region: Qlib market region, e.g. cn or us
     :param ppo_n_steps: PPO rollout length before each optimization phase
     :param batch_size: PPO minibatch size
     :param print_expr: Whether to print each generated expression
@@ -655,6 +660,7 @@ def main(
             use_llm=use_llm,
             llm_every_n_steps=llm_every_n_steps,
             qlib_data_path=resolved_qlib_data_path,
+            qlib_region=qlib_region,
             device=resolved_device,
             segments=rl_profile.segments,
             ppo_n_steps=resolved_ppo_n_steps,
@@ -674,6 +680,7 @@ def local(
     llm_every_n_steps: int = 25000,
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    qlib_region: str = "cn",
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
@@ -690,6 +697,7 @@ def local(
         profile="local",
         device=device,
         qlib_data_path=qlib_data_path,
+        qlib_region=qlib_region,
         ppo_n_steps=ppo_n_steps,
         batch_size=batch_size,
         print_expr=print_expr,
@@ -707,6 +715,7 @@ def local_smoke(
     llm_every_n_steps: int = 25000,
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    qlib_region: str = "cn",
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
@@ -723,6 +732,7 @@ def local_smoke(
         profile="local-smoke",
         device=device,
         qlib_data_path=qlib_data_path,
+        qlib_region=qlib_region,
         ppo_n_steps=ppo_n_steps,
         batch_size=batch_size,
         print_expr=print_expr,
@@ -740,6 +750,7 @@ def colab(
     llm_every_n_steps: int = 25000,
     device: Optional[str] = None,
     qlib_data_path: Optional[str] = None,
+    qlib_region: str = "cn",
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
@@ -756,6 +767,7 @@ def colab(
         profile="colab",
         device=device,
         qlib_data_path=qlib_data_path,
+        qlib_region=qlib_region,
         ppo_n_steps=ppo_n_steps,
         batch_size=batch_size,
         print_expr=print_expr,

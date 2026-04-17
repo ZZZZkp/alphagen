@@ -42,13 +42,14 @@ def test_local_profile_uses_laptop_friendly_defaults(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(rl, "run_single_experiment", fake_run_single_experiment)
 
-    rl.local(random_seeds=3)
+    rl.local(random_seeds=3, qlib_region="us")
 
     assert captured["seed"] == 3
     assert captured["pool_capacity"] == rl.PROFILES["local"].default_pool_capacity
     assert captured["steps"] == rl.LOCAL_STEPS[rl.PROFILES["local"].default_pool_capacity]
     assert captured["device"] == "cpu"
     assert captured["qlib_data_path"] == "/tmp/qlib"
+    assert captured["qlib_region"] == "us"
     assert captured["ppo_n_steps"] == 128
     assert captured["batch_size"] == 64
     assert captured["print_expr"] is False
