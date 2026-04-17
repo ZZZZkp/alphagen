@@ -157,6 +157,8 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         "Optimize the weights of the linear model and return the new weights as a numpy array."
 
     def test_ensemble(self, calculator: AlphaCalculator) -> Tuple[float, float]:
+        if self.size == 0:
+            return 0., 0.
         return calculator.calc_pool_all_ret(self.exprs[:self.size], self.weights)      # type: ignore
 
     def evaluate_ensemble(self) -> float:

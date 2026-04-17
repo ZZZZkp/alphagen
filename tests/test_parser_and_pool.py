@@ -110,3 +110,9 @@ def test_linear_alpha_pool_rejects_new_worst_expression_and_caches_failure() -> 
 
     assert returned_again == best_before
     assert pool.eval_cnt == eval_before + 1
+
+
+def test_linear_alpha_pool_test_ensemble_returns_neutral_metrics_for_empty_pool() -> None:
+    pool = DeterministicPool(capacity=2, calculator=FakeCalculator())
+
+    assert pool.test_ensemble(pool.calculator) == (0.0, 0.0)
