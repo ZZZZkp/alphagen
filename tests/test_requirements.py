@@ -27,6 +27,7 @@ def test_core_runtime_dependencies_are_declared() -> None:
         "fire",
         "gymnasium",
         "openai",
+        "protobuf",
         "pyqlib",
         "sb3-contrib",
         "stable-baselines3",
@@ -50,4 +51,3 @@ def test_legacy_dependency_pins_are_removed() -> None:
         assert legacy_pin not in text
 
     assert "gym==" not in text
-
