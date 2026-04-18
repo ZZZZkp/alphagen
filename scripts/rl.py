@@ -70,6 +70,9 @@ LOCAL_SMOKE_STEPS: Dict[int, int] = {
     20: 256,
 }
 
+STOCK_DATA_MAX_BACKTRACK_DAYS = 100
+STOCK_DATA_MAX_FUTURE_DAYS = 30
+
 
 @dataclass(frozen=True)
 class RLProfile:
@@ -230,28 +233,43 @@ def resolve_qlib_data_path(qlib_data_path: Optional[str], profile: RLProfile) ->
     return os.path.expanduser(profile.qlib_candidates[0])
 
 
-def validate_qlib_calendar(qlib_data_path: str, segments: Sequence[Tuple[str, str]]) -> None:
+def validate_qlib_calendar(
+    qlib_data_path: str,
+    segments: Sequence[Tuple[str, str]],
+    max_backtrack_days: int = 0,
+    max_future_days: int = 0,
+) -> None:
     calendar_path = Path(qlib_data_path).expanduser() / "calendars" / "day.txt"
     if not calendar_path.exists():
         return
-    first, last = None, None
+    dates: List[str] = []
     with open(calendar_path, encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if line == "":
                 continue
-            if first is None:
-                first = line
-            last = line
-    if first is None or last is None:
+            dates.append(line)
+    if not dates:
         return
+    if len(dates) <= max_backtrack_days + max_future_days:
+        raise ValueError(
+            "The selected Qlib dataset is too short for the configured StockData padding: "
+            f"{len(dates)} calendar rows for backtrack={max_backtrack_days}, future={max_future_days}."
+        )
+
+    first = dates[0]
+    last = dates[-1]
+    first_usable = dates[max_backtrack_days]
+    last_usable = dates[-1 - max_future_days] if max_future_days > 0 else dates[-1]
     earliest = min(start for start, _ in segments)
     latest = max(end for _, end in segments)
-    if first > earliest or last < latest:
+    if first_usable > earliest or last_usable < latest:
         raise ValueError(
-            "The selected Qlib dataset does not cover the requested training/test segments: "
-            f"calendar range [{first}, {last}], required [{earliest}, {latest}]. "
-            "Pass a different --qlib_data_path or use another profile."
+            "The selected Qlib dataset does not cover the requested training/test segments once "
+            "StockData padding is applied: "
+            f"calendar range [{first}, {last}], usable range [{first_usable}, {last_usable}], "
+            f"required [{earliest}, {latest}] with backtrack={max_backtrack_days}, "
+            f"future={max_future_days}. Pass a different --qlib_data_path or shrink the segments."
         )
 
 
@@ -456,6 +474,12 @@ def run_single_experiment(
     print_expr: bool = True,
 ):
     reseed_everything(seed)
+    validate_qlib_calendar(
+        qlib_data_path,
+        segments,
+        max_backtrack_days=STOCK_DATA_MAX_BACKTRACK_DAYS,
+        max_future_days=STOCK_DATA_MAX_FUTURE_DAYS,
+    )
     initialize_qlib(qlib_data_path, region=qlib_region)
 
     llm_replace_n = 0 if not use_llm else llm_replace_n
@@ -526,6 +550,8 @@ def run_single_experiment(
             instrument=instruments,
             start_time=start,
             end_time=end,
+            max_backtrack_days=STOCK_DATA_MAX_BACKTRACK_DAYS,
+            max_future_days=STOCK_DATA_MAX_FUTURE_DAYS,
             device=device
         )
 
@@ -635,7 +661,12 @@ def main(
     selected_steps = rl_profile.default_steps
     resolved_device = resolve_device(device, rl_profile)
     resolved_qlib_data_path = resolve_qlib_data_path(qlib_data_path, rl_profile)
-    validate_qlib_calendar(resolved_qlib_data_path, rl_profile.segments)
+    validate_qlib_calendar(
+        resolved_qlib_data_path,
+        rl_profile.segments,
+        max_backtrack_days=STOCK_DATA_MAX_BACKTRACK_DAYS,
+        max_future_days=STOCK_DATA_MAX_FUTURE_DAYS,
+    )
     resolved_ppo_n_steps = rl_profile.default_ppo_n_steps if ppo_n_steps is None else int(ppo_n_steps)
     resolved_batch_size = rl_profile.default_batch_size if batch_size is None else int(batch_size)
     resolved_print_expr = rl_profile.print_expr if print_expr is None else bool(print_expr)

@@ -103,12 +103,58 @@ class StockData:
         from qlib.data import D
         if not isinstance(exprs, list):
             exprs = [exprs]
-        cal: np.ndarray = D.calendar()
-        start_index = cal.searchsorted(pd.Timestamp(self._start_time))  # type: ignore
-        end_index = cal.searchsorted(pd.Timestamp(self._end_time))  # type: ignore
-        real_start_time = cal[start_index - self.max_backtrack_days]
-        if cal[end_index] != pd.Timestamp(self._end_time):
+        cal = pd.Index(D.calendar())
+        if len(cal) == 0:
+            raise ValueError("Qlib calendar is empty; check the provider_uri and downloaded dataset.")
+
+        start_ts = pd.Timestamp(self._start_time)
+        end_ts = pd.Timestamp(self._end_time)
+        start_index = int(cal.searchsorted(start_ts))  # type: ignore[arg-type]
+        end_index = int(cal.searchsorted(end_ts))  # type: ignore[arg-type]
+
+        if start_index >= len(cal):
+            raise ValueError(
+                f"Requested start_time {self._start_time} is outside the available Qlib calendar "
+                f"[{cal[0].strftime('%Y-%m-%d')}, {cal[-1].strftime('%Y-%m-%d')}]."
+            )
+
+        if end_index >= len(cal):
+            raise ValueError(
+                f"Requested end_time {self._end_time} is outside the available Qlib calendar "
+                f"[{cal[0].strftime('%Y-%m-%d')}, {cal[-1].strftime('%Y-%m-%d')}]."
+            )
+
+        if cal[end_index] != end_ts:
             end_index -= 1
+
+        if end_index < 0:
+            raise ValueError(
+                f"Requested end_time {self._end_time} is earlier than the first available Qlib date "
+                f"{cal[0].strftime('%Y-%m-%d')}."
+            )
+
+        if start_index < self.max_backtrack_days:
+            raise ValueError(
+                f"Requested start_time {self._start_time} needs {self.max_backtrack_days} backtrack days, "
+                f"but the earliest usable date in this Qlib calendar is "
+                f"{cal[self.max_backtrack_days].strftime('%Y-%m-%d')}."
+            )
+
+        last_usable_index = len(cal) - 1 - self.max_future_days
+        if last_usable_index < 0:
+            raise ValueError(
+                f"Qlib calendar has only {len(cal)} entries, which is shorter than the required future "
+                f"padding ({self.max_future_days} days)."
+            )
+
+        if end_index > last_usable_index:
+            raise ValueError(
+                f"Requested end_time {self._end_time} needs {self.max_future_days} future days, "
+                f"but the latest usable date in this Qlib calendar is "
+                f"{cal[last_usable_index].strftime('%Y-%m-%d')}."
+            )
+
+        real_start_time = cal[start_index - self.max_backtrack_days]
         real_end_time = cal[end_index + self.max_future_days]
         return (QlibDataLoader(config=exprs)  # type: ignore
                 .load(self._instrument, real_start_time, real_end_time))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+import pandas as pd
 import pytest
 
 import alphagen_qlib.stock_data as stock_data
@@ -59,3 +60,43 @@ def test_initialize_qlib_rejects_switching_region_without_restart(monkeypatch: p
 
     with pytest.raises(RuntimeError, match="already initialized"):
         stock_data.initialize_qlib("/tmp/us_data", region="us")
+
+
+def test_stock_data_rejects_end_date_outside_available_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_loader_module = ModuleType("qlib.data.dataset.loader")
+    fake_dataset_module = ModuleType("qlib.data.dataset")
+    fake_data_module = ModuleType("qlib.data")
+
+    class FakeLoader:
+        def __init__(self, config):
+            self.config = config
+
+        def load(self, instrument, start_time, end_time):
+            raise AssertionError("load() should not be reached when calendar validation fails")
+
+    fake_loader_module.QlibDataLoader = FakeLoader  # type: ignore[attr-defined]
+    fake_dataset_module.loader = fake_loader_module  # type: ignore[attr-defined]
+    fake_data_module.D = type(
+        "FakeD",
+        (),
+        {
+            "calendar": staticmethod(
+                lambda: pd.Index(pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]))
+            )
+        },
+    )
+
+    monkeypatch.setitem(sys.modules, "qlib.data", fake_data_module)
+    monkeypatch.setitem(sys.modules, "qlib.data.dataset", fake_dataset_module)
+    monkeypatch.setitem(sys.modules, "qlib.data.dataset.loader", fake_loader_module)
+    monkeypatch.setattr(stock_data, "_QLIB_INITIALIZED", True)
+
+    with pytest.raises(ValueError, match="Requested end_time 2024-01-31 is outside the available Qlib calendar"):
+        stock_data.StockData(
+            instrument="sp500",
+            start_time="2024-01-02",
+            end_time="2024-01-31",
+            max_backtrack_days=0,
+            max_future_days=0,
+            device="cpu",  # type: ignore[arg-type]
+        )

@@ -30,12 +30,33 @@ def test_validate_qlib_calendar_rejects_missing_segment_coverage(tmp_path: Path)
         rl.validate_qlib_calendar(str(tmp_path), (("2022-01-01", "2022-01-31"),))
 
 
+def test_validate_qlib_calendar_respects_stock_data_padding(tmp_path: Path) -> None:
+    calendars_dir = tmp_path / "calendars"
+    calendars_dir.mkdir()
+    (calendars_dir / "day.txt").write_text(
+        "2024-01-02\n2024-01-03\n2024-01-04\n2024-01-05\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="usable range"):
+        rl.validate_qlib_calendar(
+            str(tmp_path),
+            (("2024-01-03", "2024-01-05"),),
+            max_backtrack_days=1,
+            max_future_days=1,
+        )
+
+
 def test_local_profile_uses_laptop_friendly_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(rl, "resolve_device", lambda device, profile: "cpu")
     monkeypatch.setattr(rl, "resolve_qlib_data_path", lambda path, profile: "/tmp/qlib")
-    monkeypatch.setattr(rl, "validate_qlib_calendar", lambda path, segments: None)
+    monkeypatch.setattr(
+        rl,
+        "validate_qlib_calendar",
+        lambda path, segments, max_backtrack_days=0, max_future_days=0: None,
+    )
 
     def fake_run_single_experiment(**kwargs):
         captured.update(kwargs)
@@ -61,10 +82,39 @@ def test_resolve_tensorboard_log_returns_none_when_tensorboard_missing(monkeypat
     assert rl.resolve_tensorboard_log() is None
 
 
+def test_run_single_experiment_validates_calendar_for_direct_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Sentinel(Exception):
+        pass
+
+    monkeypatch.setattr(rl, "reseed_everything", lambda seed: None)
+
+    def fail_validation(path, segments, max_backtrack_days=0, max_future_days=0):
+        raise Sentinel((path, segments, max_backtrack_days, max_future_days))
+
+    monkeypatch.setattr(rl, "validate_qlib_calendar", fail_validation)
+
+    with pytest.raises(Sentinel) as exc_info:
+        rl.run_single_experiment(
+            qlib_data_path="/tmp/qlib",
+            segments=(("2020-01-01", "2020-12-31"),),
+        )
+
+    assert exc_info.value.args[0] == (
+        "/tmp/qlib",
+        (("2020-01-01", "2020-12-31"),),
+        rl.STOCK_DATA_MAX_BACKTRACK_DAYS,
+        rl.STOCK_DATA_MAX_FUTURE_DAYS,
+    )
+
+
 def test_main_rejects_batch_size_larger_than_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rl, "resolve_device", lambda device, profile: "cpu")
     monkeypatch.setattr(rl, "resolve_qlib_data_path", lambda path, profile: "/tmp/qlib")
-    monkeypatch.setattr(rl, "validate_qlib_calendar", lambda path, segments: None)
+    monkeypatch.setattr(
+        rl,
+        "validate_qlib_calendar",
+        lambda path, segments, max_backtrack_days=0, max_future_days=0: None,
+    )
 
     with pytest.raises(ValueError, match="batch_size"):
         rl.main(profile="local", pool_capacity=10, ppo_n_steps=32, batch_size=64)
