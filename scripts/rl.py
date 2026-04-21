@@ -318,6 +318,8 @@ class CustomCallback(BaseCallback):
         drop_rl_n: int = 5,
         heartbeat_every_n_steps: int = 32,
         heartbeat_every_seconds: float = 10.0,
+        checkpoint_every_n_rollouts: int = 1,
+        model_checkpoint_start_step: int = 0,
     ):
         super().__init__(verbose)
         self.save_path = save_path
@@ -337,6 +339,11 @@ class CustomCallback(BaseCallback):
         self._last_heartbeat_step = 0
         self._last_heartbeat_time = time.time()
         self._started_at = time.time()
+        self._checkpoint_every_n_rollouts = max(1, int(checkpoint_every_n_rollouts))
+        self._model_checkpoint_start_step = max(0, int(model_checkpoint_start_step))
+        self._rollout_count = 0
+        self._last_pool_checkpoint_step = -1
+        self._last_model_checkpoint_step = -1
 
     def _on_step(self) -> bool:
         now = time.time()
@@ -352,6 +359,7 @@ class CustomCallback(BaseCallback):
         self._write_status("training_start")
 
     def _on_rollout_end(self) -> None:
+        self._rollout_count += 1
         if self.chat_session is not None:
             self._try_use_llm()
 
@@ -377,16 +385,36 @@ class CustomCallback(BaseCallback):
         )
 
     def _on_training_end(self) -> None:
+        self.save_checkpoint(force=True)
         self._write_status("training_end")
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, force: bool = False) -> None:
+        if not force and self._rollout_count % self._checkpoint_every_n_rollouts != 0:
+            return
         path = os.path.join(self.save_path, f'{self.num_timesteps}_steps')
-        self.model.save(path)   # type: ignore
-        if self.verbose > 1:
-            print(f'Saving model checkpoint to {path}')
-        with open(f'{path}_pool.json', 'w') as f:
-            json.dump(self.pool.to_json_dict(), f)
-        self._append_monitor_log(f"checkpoint saved: {path}")
+        pool_saved = False
+        model_saved = False
+        if self.num_timesteps != self._last_pool_checkpoint_step:
+            with open(f'{path}_pool.json', 'w') as f:
+                json.dump(self.pool.to_json_dict(), f)
+            self._last_pool_checkpoint_step = self.num_timesteps
+            pool_saved = True
+        if (
+            self.num_timesteps >= self._model_checkpoint_start_step and
+            self.num_timesteps != self._last_model_checkpoint_step
+        ):
+            self.model.save(path)   # type: ignore
+            self._last_model_checkpoint_step = self.num_timesteps
+            model_saved = True
+            if self.verbose > 1:
+                print(f'Saving model checkpoint to {path}')
+        if pool_saved or model_saved:
+            saved_parts = []
+            if pool_saved:
+                saved_parts.append("pool")
+            if model_saved:
+                saved_parts.append("model")
+            self._append_monitor_log(f"checkpoint saved ({'+'.join(saved_parts)}): {path}")
 
     def show_pool_state(self):
         state = self.pool.state
@@ -472,7 +500,9 @@ def run_single_experiment(
     ppo_n_steps: int = 2048,
     batch_size: int = 128,
     print_expr: bool = True,
-):
+    checkpoint_every_n_rollouts: int = 1,
+    model_checkpoint_start_step: int = 0,
+) -> str:
     reseed_everything(seed)
     validate_qlib_calendar(
         qlib_data_path,
@@ -525,6 +555,8 @@ def run_single_experiment(
             "ppo_n_steps": ppo_n_steps,
             "batch_size": batch_size,
             "print_expr": print_expr,
+            "checkpoint_every_n_rollouts": checkpoint_every_n_rollouts,
+            "model_checkpoint_start_step": model_checkpoint_start_step,
         },
     )
     _write_json(
@@ -593,7 +625,9 @@ def run_single_experiment(
         verbose=1,
         chat_session=inter,
         llm_every_n_steps=llm_every_n_steps,
-        drop_rl_n=drop_rl_n
+        drop_rl_n=drop_rl_n,
+        checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
+        model_checkpoint_start_step=model_checkpoint_start_step,
     )
     model = MaskablePPO(
         "MlpPolicy",
@@ -620,6 +654,7 @@ def run_single_experiment(
         callback=checkpoint_callback,
         tb_log_name=name_prefix,
     )
+    return save_path
 
 
 def main(
@@ -638,6 +673,8 @@ def main(
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
+    checkpoint_every_n_rollouts: int = 1,
+    model_checkpoint_start_step: int = 0,
 ):
     """
     :param random_seeds: Random seeds
@@ -655,6 +692,8 @@ def main(
     :param ppo_n_steps: PPO rollout length before each optimization phase
     :param batch_size: PPO minibatch size
     :param print_expr: Whether to print each generated expression
+    :param checkpoint_every_n_rollouts: Save checkpoints every n rollout ends
+    :param model_checkpoint_start_step: Start saving model weights once this timestep is reached
     """
     rl_profile = get_profile(profile)
     selected_pool_capacity = rl_profile.default_pool_capacity if pool_capacity is None else int(pool_capacity)
@@ -701,6 +740,8 @@ def main(
             ppo_n_steps=resolved_ppo_n_steps,
             batch_size=resolved_batch_size,
             print_expr=resolved_print_expr,
+            checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
+            model_checkpoint_start_step=model_checkpoint_start_step,
         )
 
 
@@ -719,6 +760,8 @@ def local(
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
+    checkpoint_every_n_rollouts: int = 1,
+    model_checkpoint_start_step: int = 0,
 ):
     return main(
         random_seeds=random_seeds,
@@ -736,6 +779,8 @@ def local(
         ppo_n_steps=ppo_n_steps,
         batch_size=batch_size,
         print_expr=print_expr,
+        checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
+        model_checkpoint_start_step=model_checkpoint_start_step,
     )
 
 
@@ -754,6 +799,8 @@ def local_smoke(
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
+    checkpoint_every_n_rollouts: int = 1,
+    model_checkpoint_start_step: int = 0,
 ):
     return main(
         random_seeds=random_seeds,
@@ -771,6 +818,8 @@ def local_smoke(
         ppo_n_steps=ppo_n_steps,
         batch_size=batch_size,
         print_expr=print_expr,
+        checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
+        model_checkpoint_start_step=model_checkpoint_start_step,
     )
 
 
@@ -789,6 +838,8 @@ def colab(
     ppo_n_steps: Optional[int] = None,
     batch_size: Optional[int] = None,
     print_expr: Optional[bool] = None,
+    checkpoint_every_n_rollouts: int = 1,
+    model_checkpoint_start_step: int = 0,
 ):
     return main(
         random_seeds=random_seeds,
@@ -806,6 +857,8 @@ def colab(
         ppo_n_steps=ppo_n_steps,
         batch_size=batch_size,
         print_expr=print_expr,
+        checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
+        model_checkpoint_start_step=model_checkpoint_start_step,
     )
 
 

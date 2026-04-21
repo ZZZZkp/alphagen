@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -132,3 +133,42 @@ def test_status_reads_latest_run_status_file(tmp_path: Path) -> None:
     payload = rl.status(results_root=str(tmp_path))
 
     assert payload["event"] in {"old", "new"}
+
+
+def test_custom_callback_defers_model_checkpoints_until_configured_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback = rl.CustomCallback(
+        save_path=str(tmp_path),
+        test_calculators=[],
+        checkpoint_every_n_rollouts=10,
+        model_checkpoint_start_step=50,
+    )
+    saved_models: list[str] = []
+
+    class DummyPool:
+        def to_json_dict(self) -> dict[str, object]:
+            return {"exprs": [], "weights": []}
+
+    dummy_pool = DummyPool()
+    monkeypatch.setattr(rl.CustomCallback, "pool", property(lambda self: dummy_pool))
+    training_env = SimpleNamespace(
+        envs=[SimpleNamespace(unwrapped=SimpleNamespace(pool=dummy_pool))]
+    )
+    callback.model = SimpleNamespace(
+        save=lambda path: saved_models.append(path),
+        get_env=lambda: training_env,
+    )
+
+    callback.num_timesteps = 40
+    callback._rollout_count = 10
+    callback.save_checkpoint()
+    assert (tmp_path / "40_steps_pool.json").exists()
+    assert saved_models == []
+
+    callback.num_timesteps = 60
+    callback._rollout_count = 20
+    callback.save_checkpoint()
+    assert (tmp_path / "60_steps_pool.json").exists()
+    assert saved_models == [str(tmp_path / "60_steps")]
