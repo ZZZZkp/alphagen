@@ -483,6 +483,18 @@ class CustomCallback(BaseCallback):
         return self.training_env.envs[0].unwrapped  # type: ignore
 
 
+def _build_learning_rate(rate: float, schedule: str):
+    schedule_normalized = (schedule or "constant").lower()
+    rate_value = float(rate)
+    if schedule_normalized == "constant":
+        return rate_value
+    if schedule_normalized == "linear":
+        return lambda progress_remaining: rate_value * progress_remaining
+    raise ValueError(
+        f"Unknown lr_schedule={schedule!r}. Expected 'constant' or 'linear'."
+    )
+
+
 def run_single_experiment(
     seed: int = 0,
     instruments: str = "csi300",
@@ -502,6 +514,8 @@ def run_single_experiment(
     print_expr: bool = True,
     checkpoint_every_n_rollouts: int = 1,
     model_checkpoint_start_step: int = 0,
+    learning_rate: float = 3e-4,
+    lr_schedule: str = "constant",
 ) -> str:
     reseed_everything(seed)
     validate_qlib_calendar(
@@ -557,6 +571,8 @@ def run_single_experiment(
             "print_expr": print_expr,
             "checkpoint_every_n_rollouts": checkpoint_every_n_rollouts,
             "model_checkpoint_start_step": model_checkpoint_start_step,
+            "learning_rate": float(learning_rate),
+            "lr_schedule": lr_schedule,
         },
     )
     _write_json(
@@ -645,6 +661,7 @@ def run_single_experiment(
         ent_coef=0.01,
         n_steps=ppo_n_steps,
         batch_size=batch_size,
+        learning_rate=_build_learning_rate(learning_rate, lr_schedule),
         tensorboard_log=resolve_tensorboard_log(),
         device=device,
         verbose=1,
@@ -675,6 +692,8 @@ def main(
     print_expr: Optional[bool] = None,
     checkpoint_every_n_rollouts: int = 1,
     model_checkpoint_start_step: int = 0,
+    learning_rate: float = 3e-4,
+    lr_schedule: str = "constant",
 ):
     """
     :param random_seeds: Random seeds
@@ -694,6 +713,8 @@ def main(
     :param print_expr: Whether to print each generated expression
     :param checkpoint_every_n_rollouts: Save checkpoints every n rollout ends
     :param model_checkpoint_start_step: Start saving model weights once this timestep is reached
+    :param learning_rate: PPO learning rate (start value when lr_schedule != 'constant')
+    :param lr_schedule: 'constant' or 'linear' (decay learning_rate -> 0 over total steps)
     """
     rl_profile = get_profile(profile)
     selected_pool_capacity = rl_profile.default_pool_capacity if pool_capacity is None else int(pool_capacity)
@@ -742,6 +763,8 @@ def main(
             print_expr=resolved_print_expr,
             checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
             model_checkpoint_start_step=model_checkpoint_start_step,
+            learning_rate=learning_rate,
+            lr_schedule=lr_schedule,
         )
 
 
@@ -762,6 +785,8 @@ def local(
     print_expr: Optional[bool] = None,
     checkpoint_every_n_rollouts: int = 1,
     model_checkpoint_start_step: int = 0,
+    learning_rate: float = 3e-4,
+    lr_schedule: str = "constant",
 ):
     return main(
         random_seeds=random_seeds,
@@ -781,6 +806,8 @@ def local(
         print_expr=print_expr,
         checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
         model_checkpoint_start_step=model_checkpoint_start_step,
+        learning_rate=learning_rate,
+        lr_schedule=lr_schedule,
     )
 
 
@@ -801,6 +828,8 @@ def local_smoke(
     print_expr: Optional[bool] = None,
     checkpoint_every_n_rollouts: int = 1,
     model_checkpoint_start_step: int = 0,
+    learning_rate: float = 3e-4,
+    lr_schedule: str = "constant",
 ):
     return main(
         random_seeds=random_seeds,
@@ -820,6 +849,8 @@ def local_smoke(
         print_expr=print_expr,
         checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
         model_checkpoint_start_step=model_checkpoint_start_step,
+        learning_rate=learning_rate,
+        lr_schedule=lr_schedule,
     )
 
 
@@ -840,6 +871,8 @@ def colab(
     print_expr: Optional[bool] = None,
     checkpoint_every_n_rollouts: int = 1,
     model_checkpoint_start_step: int = 0,
+    learning_rate: float = 3e-4,
+    lr_schedule: str = "constant",
 ):
     return main(
         random_seeds=random_seeds,
@@ -859,6 +892,8 @@ def colab(
         print_expr=print_expr,
         checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
         model_checkpoint_start_step=model_checkpoint_start_step,
+        learning_rate=learning_rate,
+        lr_schedule=lr_schedule,
     )
 
 
