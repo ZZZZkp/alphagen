@@ -516,6 +516,8 @@ def run_single_experiment(
     model_checkpoint_start_step: int = 0,
     learning_rate: float = 3e-4,
     lr_schedule: str = "constant",
+    ent_coef: float = 0.01,
+    clip_range: float = 0.2,
 ) -> str:
     reseed_everything(seed)
     validate_qlib_calendar(
@@ -573,6 +575,8 @@ def run_single_experiment(
             "model_checkpoint_start_step": model_checkpoint_start_step,
             "learning_rate": float(learning_rate),
             "lr_schedule": lr_schedule,
+            "ent_coef": float(ent_coef),
+            "clip_range": float(clip_range),
         },
     )
     _write_json(
@@ -658,7 +662,8 @@ def run_single_experiment(
             ),
         ),
         gamma=1.,
-        ent_coef=0.01,
+        ent_coef=float(ent_coef),
+        clip_range=float(clip_range),
         n_steps=ppo_n_steps,
         batch_size=batch_size,
         learning_rate=_build_learning_rate(learning_rate, lr_schedule),
@@ -694,6 +699,8 @@ def main(
     model_checkpoint_start_step: int = 0,
     learning_rate: float = 3e-4,
     lr_schedule: str = "constant",
+    ent_coef: float = 0.01,
+    clip_range: float = 0.2,
 ):
     """
     :param random_seeds: Random seeds
@@ -715,6 +722,8 @@ def main(
     :param model_checkpoint_start_step: Start saving model weights once this timestep is reached
     :param learning_rate: PPO learning rate (start value when lr_schedule != 'constant')
     :param lr_schedule: 'constant' or 'linear' (decay learning_rate -> 0 over total steps)
+    :param ent_coef: PPO entropy coefficient (higher = more exploration)
+    :param clip_range: PPO policy-update clip threshold (lower = more conservative updates)
     """
     rl_profile = get_profile(profile)
     selected_pool_capacity = rl_profile.default_pool_capacity if pool_capacity is None else int(pool_capacity)
@@ -765,6 +774,8 @@ def main(
             model_checkpoint_start_step=model_checkpoint_start_step,
             learning_rate=learning_rate,
             lr_schedule=lr_schedule,
+            ent_coef=ent_coef,
+            clip_range=clip_range,
         )
 
 
@@ -787,6 +798,8 @@ def local(
     model_checkpoint_start_step: int = 0,
     learning_rate: float = 3e-4,
     lr_schedule: str = "constant",
+    ent_coef: float = 0.01,
+    clip_range: float = 0.2,
 ):
     return main(
         random_seeds=random_seeds,
@@ -808,6 +821,8 @@ def local(
         model_checkpoint_start_step=model_checkpoint_start_step,
         learning_rate=learning_rate,
         lr_schedule=lr_schedule,
+        ent_coef=ent_coef,
+        clip_range=clip_range,
     )
 
 
@@ -830,6 +845,8 @@ def local_smoke(
     model_checkpoint_start_step: int = 0,
     learning_rate: float = 3e-4,
     lr_schedule: str = "constant",
+    ent_coef: float = 0.01,
+    clip_range: float = 0.2,
 ):
     return main(
         random_seeds=random_seeds,
@@ -851,6 +868,8 @@ def local_smoke(
         model_checkpoint_start_step=model_checkpoint_start_step,
         learning_rate=learning_rate,
         lr_schedule=lr_schedule,
+        ent_coef=ent_coef,
+        clip_range=clip_range,
     )
 
 
@@ -873,6 +892,8 @@ def colab(
     model_checkpoint_start_step: int = 0,
     learning_rate: float = 3e-4,
     lr_schedule: str = "constant",
+    ent_coef: float = 0.01,
+    clip_range: float = 0.2,
 ):
     return main(
         random_seeds=random_seeds,
@@ -894,6 +915,8 @@ def colab(
         model_checkpoint_start_step=model_checkpoint_start_step,
         learning_rate=learning_rate,
         lr_schedule=lr_schedule,
+        ent_coef=ent_coef,
+        clip_range=clip_range,
     )
 
 
