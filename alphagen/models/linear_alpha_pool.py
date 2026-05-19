@@ -289,9 +289,10 @@ class MseAlphaPool(LinearAlphaPool):
         if math.isclose(alpha, 0.):     # No L1 regularization, use the faster least-squares method
             return self._optimize_lstsq()
             
-        ics_ret = torch.tensor(self.single_ics[:self.size], device=self.device)
-        ics_mut = torch.tensor(self._mutual_ics[:self.size, :self.size], device=self.device)
-        weights = torch.tensor(self.weights, device=self.device, requires_grad=True)
+        # dtype=float32 required because MPS does not support float64.
+        ics_ret = torch.tensor(self.single_ics[:self.size], device=self.device, dtype=torch.float32)
+        ics_mut = torch.tensor(self._mutual_ics[:self.size, :self.size], device=self.device, dtype=torch.float32)
+        weights = torch.tensor(self.weights, device=self.device, dtype=torch.float32, requires_grad=True)
         optim = torch.optim.Adam([weights], lr=lr)
     
         loss_ic_min = float("inf")
@@ -360,7 +361,7 @@ class MeanStdAlphaPool(LinearAlphaPool):
     
     def _calc_main_objective(self) -> float:
         alpha_values = torch.stack(self._extra_info[:self.size])    # type: ignore | shape: n * days * stocks
-        weights = torch.tensor(self.weights, device=self.device)
+        weights = torch.tensor(self.weights, device=self.device, dtype=torch.float32)
         return self._calc_obj_impl(alpha_values, weights).item()
     
     def _calc_obj_impl(self, alpha_values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -375,7 +376,7 @@ class MeanStdAlphaPool(LinearAlphaPool):
 
     def optimize(self, lr: float = 5e-4, max_steps: int = 10000, tolerance: int = 500) -> np.ndarray:
         alpha_values = torch.stack(self._extra_info[:self.size])    # type: ignore | shape: n * days * stocks
-        weights = torch.tensor(self.weights, device=self.device, requires_grad=True)
+        weights = torch.tensor(self.weights, device=self.device, dtype=torch.float32, requires_grad=True)
         optimizer = torch.optim.Adam([weights], lr=lr)
     
         min_loss = float("inf")
