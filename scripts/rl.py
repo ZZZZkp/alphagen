@@ -307,6 +307,33 @@ def status(run_dir: Optional[str] = None, results_root: str = "./out/results") -
     return payload
 
 
+class _CachingCalculator(QLibStockDataCalculator):
+    """Wraps an existing QLibStockDataCalculator and memoizes evaluate_alpha by str(expr)."""
+
+    def __init__(self, calc: QLibStockDataCalculator):
+        # Skip QLibStockDataCalculator.__init__ — calc.target is already an evaluated tensor.
+        self._target = calc._target
+        self.data = calc.data
+        self._eval_cache: Dict[str, "torch.Tensor"] = {}
+
+    def evaluate_alpha(self, expr: Expression):
+        key = str(expr)
+        cached = self._eval_cache.get(key)
+        if cached is not None:
+            return cached
+        value = super().evaluate_alpha(expr)
+        self._eval_cache[key] = value
+        return value
+
+
+def _default_split_names(n: int) -> Tuple[str, ...]:
+    if n == 1:
+        return ("test",)
+    if n == 2:
+        return ("valid", "test")
+    return tuple(f"split_{i}" for i in range(1, n + 1))
+
+
 class CustomCallback(BaseCallback):
     def __init__(
         self,
@@ -320,10 +347,24 @@ class CustomCallback(BaseCallback):
         heartbeat_every_seconds: float = 10.0,
         checkpoint_every_n_rollouts: int = 1,
         model_checkpoint_start_step: int = 0,
+        split_names: Optional[List[str]] = None,
+        tb_log_every_n_steps: int = 0,
     ):
         super().__init__(verbose)
         self.save_path = save_path
-        self.test_calculators = test_calculators
+        # Wrap each calculator once so per-step TB ticks reuse cached expression tensors.
+        self.test_calculators = [
+            _CachingCalculator(c) for c in test_calculators
+        ]
+        if split_names is None:
+            self._split_names = list(_default_split_names(len(self.test_calculators)))
+        else:
+            if len(split_names) != len(self.test_calculators):
+                raise ValueError(
+                    f"split_names length {len(split_names)} does not match "
+                    f"test_calculators length {len(self.test_calculators)}"
+                )
+            self._split_names = list(split_names)
         os.makedirs(self.save_path, exist_ok=True)
         self._status_path = os.path.join(self.save_path, "status.json")
         self._monitor_log_path = os.path.join(self.save_path, "monitor.log")
@@ -344,6 +385,52 @@ class CustomCallback(BaseCallback):
         self._rollout_count = 0
         self._last_pool_checkpoint_step = -1
         self._last_model_checkpoint_step = -1
+        # Clamp the sub-rollout cadence: anything finer than 32 steps is noise.
+        self._tb_log_every_n_steps = (
+            0 if int(tb_log_every_n_steps) <= 0
+            else max(32, int(tb_log_every_n_steps))
+        )
+        self._last_tb_log_step = 0
+
+    def _compute_split_metrics(self) -> Dict[str, Dict[str, float]]:
+        if self.pool.size == 0:
+            return {}
+        from alphagen.utils.correlation import batch_pearsonr, batch_spearmanr
+        exprs = self.pool.exprs[:self.pool.size]
+        weights = self.pool.weights[:self.pool.size]
+        out: Dict[str, Dict[str, float]] = {}
+        for name, calc in zip(self._split_names, self.test_calculators):
+            with torch.no_grad():
+                value = calc.make_ensemble_alpha(exprs, weights)
+                ics = batch_pearsonr(value, calc.target)
+                rics = batch_spearmanr(value, calc.target)
+                ic_mean, ic_std = float(ics.mean()), float(ics.std())
+                ric_mean, ric_std = float(rics.mean()), float(rics.std())
+            # Guard against degenerate pools where daily IC is constant (e.g. fresh single-alpha pool).
+            out[name] = {
+                "ic": ic_mean,
+                "rank_ic": ric_mean,
+                "icir": ic_mean / ic_std if ic_std > 1e-12 else 0.0,
+                "rank_icir": ric_mean / ric_std if ric_std > 1e-12 else 0.0,
+            }
+        return out
+
+    def _record_split_metrics(self, metrics: Dict[str, Dict[str, float]]) -> None:
+        for name, vals in metrics.items():
+            self.logger.record(f"{name}/ic", vals["ic"])
+            self.logger.record(f"{name}/rank_ic", vals["rank_ic"])
+            self.logger.record(f"{name}/icir", vals["icir"])
+            self.logger.record(f"{name}/rank_icir", vals["rank_icir"])
+
+    def _record_pool_and_splits(self, metrics: Dict[str, Dict[str, float]]) -> None:
+        self.logger.record('pool/size', self.pool.size)
+        self.logger.record(
+            'pool/significant',
+            int((np.abs(self.pool.weights[:self.pool.size]) > 1e-4).sum()),
+        )
+        self.logger.record('pool/best_ic_ret', self.pool.best_ic_ret)
+        self.logger.record('pool/eval_cnt', self.pool.eval_cnt)
+        self._record_split_metrics(metrics)
 
     def _on_step(self) -> bool:
         now = time.time()
@@ -353,6 +440,13 @@ class CustomCallback(BaseCallback):
             self._write_status("heartbeat")
             self._last_heartbeat_step = self.num_timesteps
             self._last_heartbeat_time = now
+        if (
+            self._tb_log_every_n_steps > 0
+            and self.num_timesteps - self._last_tb_log_step >= self._tb_log_every_n_steps
+        ):
+            self._record_pool_and_splits(self._compute_split_metrics())
+            self.logger.dump(self.num_timesteps)
+            self._last_tb_log_step = self.num_timesteps
         return True
 
     def _on_training_start(self) -> None:
@@ -363,30 +457,17 @@ class CustomCallback(BaseCallback):
         if self.chat_session is not None:
             self._try_use_llm()
 
-        self.logger.record('pool/size', self.pool.size)
-        self.logger.record('pool/significant', (np.abs(self.pool.weights[:self.pool.size]) > 1e-4).sum())
-        self.logger.record('pool/best_ic_ret', self.pool.best_ic_ret)
-        self.logger.record('pool/eval_cnt', self.pool.eval_cnt)
-        n_days = sum(calculator.data.n_days for calculator in self.test_calculators)
-        ic_test_mean, rank_ic_test_mean = 0., 0.
-        for i, test_calculator in enumerate(self.test_calculators, start=1):
-            ic_test, rank_ic_test = self.pool.test_ensemble(test_calculator)
-            ic_test_mean += ic_test * test_calculator.data.n_days / n_days
-            rank_ic_test_mean += rank_ic_test * test_calculator.data.n_days / n_days
-            self.logger.record(f'test/ic_{i}', ic_test)
-            self.logger.record(f'test/rank_ic_{i}', rank_ic_test)
-        self.logger.record(f'test/ic_mean', ic_test_mean)
-        self.logger.record(f'test/rank_ic_mean', rank_ic_test_mean)
+        metrics = self._compute_split_metrics()
+        # Skip duplicate TB record if a sub-rollout tick already covered this exact step.
+        if self._last_tb_log_step != self.num_timesteps:
+            self._record_pool_and_splits(metrics)
+            self._last_tb_log_step = self.num_timesteps
         self.save_checkpoint()
-        self._write_status(
-            "rollout_end",
-            test_ic_mean=ic_test_mean,
-            test_rank_ic_mean=rank_ic_test_mean,
-        )
+        self._write_status("rollout_end", splits=metrics)
 
     def _on_training_end(self) -> None:
         self.save_checkpoint(force=True)
-        self._write_status("training_end")
+        self._write_status("training_end", splits=self._compute_split_metrics())
 
     def save_checkpoint(self, force: bool = False) -> None:
         if not force and self._rollout_count % self._checkpoint_every_n_rollouts != 0:
@@ -468,10 +549,22 @@ class CustomCallback(BaseCallback):
         }
         payload.update(extra)
         _write_json(self._status_path, payload)
-        self._append_monitor_log(
+        splits = payload.get("splits") if isinstance(payload.get("splits"), dict) else None
+        head = (
             f"{event}: steps={payload['num_timesteps']} pool={payload['pool_size']} "
-            f"evals={payload['pool_eval_cnt']} best_ic={payload['pool_best_ic_ret']:.4f}"
+            f"evals={payload['pool_eval_cnt']} best_ic={payload['pool_best_ic_ret']:+0.3f}"
         )
+        if splits:
+            tail_parts = [
+                f"{name}_rank_icir={vals['rank_icir']:+0.3f}"
+                for name, vals in splits.items()
+            ]
+            line = head + " " + " ".join(tail_parts)
+        elif event == "rollout_end" and int(payload["pool_size"]) == 0:
+            line = head + " <no-pool-eval>"
+        else:
+            line = head
+        self._append_monitor_log(line)
 
     @property
     def pool(self) -> LinearAlphaPool:
@@ -518,8 +611,20 @@ def run_single_experiment(
     lr_schedule: str = "constant",
     ent_coef: float = 0.01,
     clip_range: float = 0.2,
+    tb_log_every_n_steps: int = 0,
+    segment_names: Optional[Sequence[str]] = None,
 ) -> str:
     reseed_everything(seed)
+    if segment_names is None:
+        segment_names = _default_split_names(len(segments) - 1)
+        segment_names = ("train", *segment_names)
+    else:
+        segment_names = tuple(segment_names)
+        if len(segment_names) != len(segments):
+            raise ValueError(
+                f"segment_names length {len(segment_names)} does not match "
+                f"segments length {len(segments)}"
+            )
     validate_qlib_calendar(
         qlib_data_path,
         segments,
@@ -577,6 +682,8 @@ def run_single_experiment(
             "lr_schedule": lr_schedule,
             "ent_coef": float(ent_coef),
             "clip_range": float(clip_range),
+            "tb_log_every_n_steps": int(tb_log_every_n_steps),
+            "segment_names": list(segment_names),
         },
     )
     _write_json(
@@ -648,6 +755,8 @@ def run_single_experiment(
         drop_rl_n=drop_rl_n,
         checkpoint_every_n_rollouts=checkpoint_every_n_rollouts,
         model_checkpoint_start_step=model_checkpoint_start_step,
+        split_names=list(segment_names[1:]),
+        tb_log_every_n_steps=tb_log_every_n_steps,
     )
     model = MaskablePPO(
         "MlpPolicy",
@@ -701,6 +810,8 @@ def main(
     lr_schedule: str = "constant",
     ent_coef: float = 0.01,
     clip_range: float = 0.2,
+    tb_log_every_n_steps: int = 0,
+    segment_names: Optional[Sequence[str]] = None,
 ):
     """
     :param random_seeds: Random seeds
@@ -776,6 +887,8 @@ def main(
             lr_schedule=lr_schedule,
             ent_coef=ent_coef,
             clip_range=clip_range,
+            tb_log_every_n_steps=tb_log_every_n_steps,
+            segment_names=segment_names,
         )
 
 
@@ -800,6 +913,8 @@ def local(
     lr_schedule: str = "constant",
     ent_coef: float = 0.01,
     clip_range: float = 0.2,
+    tb_log_every_n_steps: int = 0,
+    segment_names: Optional[Sequence[str]] = None,
 ):
     return main(
         random_seeds=random_seeds,
@@ -823,6 +938,8 @@ def local(
         lr_schedule=lr_schedule,
         ent_coef=ent_coef,
         clip_range=clip_range,
+        tb_log_every_n_steps=tb_log_every_n_steps,
+        segment_names=segment_names,
     )
 
 
@@ -847,6 +964,8 @@ def local_smoke(
     lr_schedule: str = "constant",
     ent_coef: float = 0.01,
     clip_range: float = 0.2,
+    tb_log_every_n_steps: int = 0,
+    segment_names: Optional[Sequence[str]] = None,
 ):
     return main(
         random_seeds=random_seeds,
@@ -870,6 +989,8 @@ def local_smoke(
         lr_schedule=lr_schedule,
         ent_coef=ent_coef,
         clip_range=clip_range,
+        tb_log_every_n_steps=tb_log_every_n_steps,
+        segment_names=segment_names,
     )
 
 
@@ -894,6 +1015,8 @@ def colab(
     lr_schedule: str = "constant",
     ent_coef: float = 0.01,
     clip_range: float = 0.2,
+    tb_log_every_n_steps: int = 0,
+    segment_names: Optional[Sequence[str]] = None,
 ):
     return main(
         random_seeds=random_seeds,
@@ -917,6 +1040,8 @@ def colab(
         lr_schedule=lr_schedule,
         ent_coef=ent_coef,
         clip_range=clip_range,
+        tb_log_every_n_steps=tb_log_every_n_steps,
+        segment_names=segment_names,
     )
 
 

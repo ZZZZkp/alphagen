@@ -136,6 +136,11 @@ python scripts/llm_test_validity.py --help
     - The model is compatiable with [stable-baselines3](https://github.com/DLR-RM/stable-baselines3)
     - Alpha pools are formatted in human-readable JSON.
 - Tensorboard logs are located in `tensorboard_log`.
+    - Per-split scalars are namespaced by `segment_names`: pass `segment_names=("train","valid","test")` to `run_single_experiment` and you get `valid/{ic,rank_ic,icir,rank_icir}` and `test/{ic,rank_ic,icir,rank_icir}` keys (vs. the legacy `test/ic_{i}` numeric scheme).
+    - Set `tb_log_every_n_steps` (>= 32) to record those scalars within a rollout rather than only at rollout end. Default `0` keeps the original per-rollout cadence.
+- `monitor.log` carries a one-liner per heartbeat/rollout/training event. Rollout and training-end lines include per-split `rank_icir`, e.g. `rollout_end: ... best_ic=+0.087 valid_rank_icir=+0.30 test_rank_icir=+0.18`.
+- `status.json` is overwritten on every event. Latest `rollout_end` / `training_end` entries carry a `splits` dict with the full `{ic, rank_ic, icir, rank_icir}` per non-train segment.
+- For an offline pass over an existing tree of `*_pool.json` checkpoints (e.g. results synced down from Colab), run `python scripts/evaluate_local_runs.py --runs_dir <DIR> --qlib_data <PATH>`. It writes `checkpoint_metrics.csv`, `checkpoint_selection.csv`, `best_segment_metrics.csv` per run and aggregates into `<DIR>/aggregate/`.
 
 ## Baselines
 
