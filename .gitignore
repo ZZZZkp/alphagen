@@ -15,3 +15,5 @@ tb_logs/
 get_baostock_data.ipynb
 get_baostock_data.py
 /utils/
+/notebooks/runs/
+/qlib_data/
