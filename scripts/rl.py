@@ -641,6 +641,7 @@ def run_single_experiment(
     early_stop_min_delta: float = 1e-3,
     output_dir: Optional[str] = None,
     save_model_checkpoints: bool = True,
+    ic_mut_threshold: float = 0.99,
 ) -> str:
     reseed_everything(seed)
     if segment_names is None:
@@ -719,6 +720,7 @@ def run_single_experiment(
             "early_stop_warmup_steps": int(early_stop_warmup_steps),
             "early_stop_min_delta": float(early_stop_min_delta),
             "save_model_checkpoints": bool(save_model_checkpoints),
+            "ic_mut_threshold": float(ic_mut_threshold),
         },
     )
     _write_json(
@@ -758,7 +760,8 @@ def run_single_experiment(
             calculator=calculators[0],
             ic_lower_bound=None,
             l1_alpha=5e-3,
-            device=device
+            device=device,
+            ic_mut_threshold=ic_mut_threshold,
         )
         if len(exprs) != 0:
             pool.force_load_exprs(exprs)
@@ -854,6 +857,7 @@ def main(
     early_stop_patience: int = 0,
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
+    ic_mut_threshold: float = 0.99,
 ):
     """
     :param random_seeds: Random seeds
@@ -934,6 +938,7 @@ def main(
             early_stop_patience=early_stop_patience,
             early_stop_warmup_steps=early_stop_warmup_steps,
             early_stop_min_delta=early_stop_min_delta,
+            ic_mut_threshold=ic_mut_threshold,
         )
 
 
@@ -963,6 +968,7 @@ def local(
     early_stop_patience: int = 0,
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
+    ic_mut_threshold: float = 0.99,
 ):
     return main(
         random_seeds=random_seeds,
@@ -991,6 +997,7 @@ def local(
         early_stop_patience=early_stop_patience,
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
+        ic_mut_threshold=ic_mut_threshold,
     )
 
 
@@ -1020,6 +1027,7 @@ def local_smoke(
     early_stop_patience: int = 0,
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
+    ic_mut_threshold: float = 0.99,
 ):
     return main(
         random_seeds=random_seeds,
@@ -1048,6 +1056,7 @@ def local_smoke(
         early_stop_patience=early_stop_patience,
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
+        ic_mut_threshold=ic_mut_threshold,
     )
 
 
@@ -1077,6 +1086,7 @@ def colab(
     early_stop_patience: int = 0,
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
+    ic_mut_threshold: float = 0.99,
 ):
     return main(
         random_seeds=random_seeds,
@@ -1105,6 +1115,7 @@ def colab(
         early_stop_patience=early_stop_patience,
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
+        ic_mut_threshold=ic_mut_threshold,
     )
 
 

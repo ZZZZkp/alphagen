@@ -19,7 +19,8 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         capacity: int,
         calculator: AlphaCalculator,
         ic_lower_bound: Optional[float] = None,
-        device: torch.device = torch.device("cpu")
+        device: torch.device = torch.device("cpu"),
+        ic_mut_threshold: float = 0.99,
     ):
         super().__init__(capacity, calculator, device)
         self.exprs: List[Optional[Expression]] = [None for _ in range(capacity + 1)]
@@ -28,6 +29,7 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         self._mutual_ics: np.ndarray = np.identity(capacity + 1)
         self._extra_info = [None for _ in range(capacity + 1)]
         self._ic_lower_bound = -1. if ic_lower_bound is None else ic_lower_bound
+        self._ic_mut_threshold = float(ic_mut_threshold)
         self.best_obj = -1.
         self.update_history: List[PoolUpdate] = []
         self._failure_cache: Set[str] = set()
@@ -59,7 +61,7 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         }
 
     def try_new_expr(self, expr: Expression) -> float:
-        ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=0.99)
+        ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=self._ic_mut_threshold)
         if ic_ret is None or ic_mut is None or np.isnan(ic_ret) or np.isnan(ic_mut).any():
             return 0.
         if str(expr) in self._failure_cache:
@@ -279,9 +281,10 @@ class MseAlphaPool(LinearAlphaPool):
         calculator: AlphaCalculator,
         ic_lower_bound: Optional[float] = None,
         l1_alpha: float = 5e-3,
-        device: torch.device = torch.device("cpu")
+        device: torch.device = torch.device("cpu"),
+        ic_mut_threshold: float = 0.99,
     ):
-        super().__init__(capacity, calculator, ic_lower_bound, device)
+        super().__init__(capacity, calculator, ic_lower_bound, device, ic_mut_threshold)
         self._l1_alpha = l1_alpha
 
     def optimize(self, lr: float = 5e-4, max_steps: int = 10000, tolerance: int = 500) -> np.ndarray:
@@ -344,14 +347,16 @@ class MeanStdAlphaPool(LinearAlphaPool):
         ic_lower_bound: Optional[float] = None,
         l1_alpha: float = 5e-3,
         lcb_beta: Optional[float] = None,
-        device: torch.device = torch.device("cpu")
+        device: torch.device = torch.device("cpu"),
+        ic_mut_threshold: float = 0.99,
     ):
         """
         l1_alpha: the L1 regularization coefficient.
-        lcb_beta: for optimizing the lower-confidence-bound: LCB = mean - beta * std, \
+        lcb_beta: for optimizing the lower-confidence-bound: LCB = mean - beta * std,
                   when this is None, optimize ICIR (mean / std) instead.
+        ic_mut_threshold: max allowed mutual IC vs pool members; new factors above this are rejected.
         """
-        super().__init__(capacity, calculator, ic_lower_bound, device)
+        super().__init__(capacity, calculator, ic_lower_bound, device, ic_mut_threshold)
         self.calculator: TensorAlphaCalculator
         self._l1_alpha = l1_alpha
         self._lcb_beta = lcb_beta
