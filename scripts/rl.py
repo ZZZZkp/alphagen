@@ -29,7 +29,7 @@ from alphagen.models.linear_alpha_pool import LinearAlphaPool, MseAlphaPool
 from alphagen.rl.env.core import AlphaEnvCore
 from alphagen.rl.env.wrapper import AlphaEnv
 from alphagen.rl.policy import LSTMSharedNet
-from alphagen.utils import get_logger, reseed_everything
+from alphagen.utils import EarlyStopState, get_logger, reseed_everything
 from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.stock_data import initialize_qlib
 from alphagen_llm.client import ChatClient, ChatConfig, OpenAIClient
@@ -349,6 +349,9 @@ class CustomCallback(BaseCallback):
         model_checkpoint_start_step: int = 0,
         split_names: Optional[List[str]] = None,
         tb_log_every_n_steps: int = 0,
+        early_stop_patience: int = 0,
+        early_stop_warmup_steps: int = 20_000,
+        early_stop_min_delta: float = 1e-3,
     ):
         super().__init__(verbose)
         self.save_path = save_path
@@ -391,6 +394,11 @@ class CustomCallback(BaseCallback):
             else max(32, int(tb_log_every_n_steps))
         )
         self._last_tb_log_step = 0
+        self._early_stop = EarlyStopState(
+            patience=int(early_stop_patience),
+            warmup_steps=int(early_stop_warmup_steps),
+            min_delta=float(early_stop_min_delta),
+        )
 
     def _compute_split_metrics(self) -> Dict[str, Dict[str, float]]:
         if self.pool.size == 0:
@@ -447,7 +455,7 @@ class CustomCallback(BaseCallback):
             self._record_pool_and_splits(self._compute_split_metrics())
             self.logger.dump(self.num_timesteps)
             self._last_tb_log_step = self.num_timesteps
-        return True
+        return not self._early_stop.stopped
 
     def _on_training_start(self) -> None:
         self._write_status("training_start")
@@ -463,6 +471,17 @@ class CustomCallback(BaseCallback):
             self._record_pool_and_splits(metrics)
             self._last_tb_log_step = self.num_timesteps
         self.save_checkpoint()
+
+        valid_metrics = metrics.get("valid") if isinstance(metrics, dict) else None
+        if valid_metrics is not None and self._early_stop.patience > 0:
+            triggered = self._early_stop.update(
+                self.num_timesteps, valid_metrics["rank_icir"]
+            )
+            if triggered:
+                self._append_monitor_log(
+                    f"early_stop triggered: {self._early_stop.stop_reason}"
+                )
+
         self._write_status("rollout_end", splits=metrics)
 
     def _on_training_end(self) -> None:
@@ -548,6 +567,7 @@ class CustomCallback(BaseCallback):
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         payload.update(extra)
+        payload["early_stop"] = self._early_stop.snapshot()
         _write_json(self._status_path, payload)
         splits = payload.get("splits") if isinstance(payload.get("splits"), dict) else None
         head = (
@@ -613,6 +633,9 @@ def run_single_experiment(
     clip_range: float = 0.2,
     tb_log_every_n_steps: int = 0,
     segment_names: Optional[Sequence[str]] = None,
+    early_stop_patience: int = 0,
+    early_stop_warmup_steps: int = 20_000,
+    early_stop_min_delta: float = 1e-3,
 ) -> str:
     reseed_everything(seed)
     if segment_names is None:
@@ -684,6 +707,9 @@ def run_single_experiment(
             "clip_range": float(clip_range),
             "tb_log_every_n_steps": int(tb_log_every_n_steps),
             "segment_names": list(segment_names),
+            "early_stop_patience": int(early_stop_patience),
+            "early_stop_warmup_steps": int(early_stop_warmup_steps),
+            "early_stop_min_delta": float(early_stop_min_delta),
         },
     )
     _write_json(
@@ -757,6 +783,9 @@ def run_single_experiment(
         model_checkpoint_start_step=model_checkpoint_start_step,
         split_names=list(segment_names[1:]),
         tb_log_every_n_steps=tb_log_every_n_steps,
+        early_stop_patience=early_stop_patience,
+        early_stop_warmup_steps=early_stop_warmup_steps,
+        early_stop_min_delta=early_stop_min_delta,
     )
     model = MaskablePPO(
         "MlpPolicy",
@@ -812,6 +841,9 @@ def main(
     clip_range: float = 0.2,
     tb_log_every_n_steps: int = 0,
     segment_names: Optional[Sequence[str]] = None,
+    early_stop_patience: int = 0,
+    early_stop_warmup_steps: int = 20_000,
+    early_stop_min_delta: float = 1e-3,
 ):
     """
     :param random_seeds: Random seeds
@@ -889,6 +921,9 @@ def main(
             clip_range=clip_range,
             tb_log_every_n_steps=tb_log_every_n_steps,
             segment_names=segment_names,
+            early_stop_patience=early_stop_patience,
+            early_stop_warmup_steps=early_stop_warmup_steps,
+            early_stop_min_delta=early_stop_min_delta,
         )
 
 
@@ -915,6 +950,9 @@ def local(
     clip_range: float = 0.2,
     tb_log_every_n_steps: int = 0,
     segment_names: Optional[Sequence[str]] = None,
+    early_stop_patience: int = 0,
+    early_stop_warmup_steps: int = 20_000,
+    early_stop_min_delta: float = 1e-3,
 ):
     return main(
         random_seeds=random_seeds,
@@ -940,6 +978,9 @@ def local(
         clip_range=clip_range,
         tb_log_every_n_steps=tb_log_every_n_steps,
         segment_names=segment_names,
+        early_stop_patience=early_stop_patience,
+        early_stop_warmup_steps=early_stop_warmup_steps,
+        early_stop_min_delta=early_stop_min_delta,
     )
 
 
@@ -966,6 +1007,9 @@ def local_smoke(
     clip_range: float = 0.2,
     tb_log_every_n_steps: int = 0,
     segment_names: Optional[Sequence[str]] = None,
+    early_stop_patience: int = 0,
+    early_stop_warmup_steps: int = 20_000,
+    early_stop_min_delta: float = 1e-3,
 ):
     return main(
         random_seeds=random_seeds,
@@ -991,6 +1035,9 @@ def local_smoke(
         clip_range=clip_range,
         tb_log_every_n_steps=tb_log_every_n_steps,
         segment_names=segment_names,
+        early_stop_patience=early_stop_patience,
+        early_stop_warmup_steps=early_stop_warmup_steps,
+        early_stop_min_delta=early_stop_min_delta,
     )
 
 
@@ -1017,6 +1064,9 @@ def colab(
     clip_range: float = 0.2,
     tb_log_every_n_steps: int = 0,
     segment_names: Optional[Sequence[str]] = None,
+    early_stop_patience: int = 0,
+    early_stop_warmup_steps: int = 20_000,
+    early_stop_min_delta: float = 1e-3,
 ):
     return main(
         random_seeds=random_seeds,
@@ -1042,6 +1092,9 @@ def colab(
         clip_range=clip_range,
         tb_log_every_n_steps=tb_log_every_n_steps,
         segment_names=segment_names,
+        early_stop_patience=early_stop_patience,
+        early_stop_warmup_steps=early_stop_warmup_steps,
+        early_stop_min_delta=early_stop_min_delta,
     )
 
 
