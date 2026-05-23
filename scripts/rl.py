@@ -352,6 +352,7 @@ class CustomCallback(BaseCallback):
         early_stop_patience: int = 0,
         early_stop_warmup_steps: int = 20_000,
         early_stop_min_delta: float = 1e-3,
+        save_model_checkpoints: bool = True,
     ):
         super().__init__(verbose)
         self.save_path = save_path
@@ -399,6 +400,7 @@ class CustomCallback(BaseCallback):
             warmup_steps=int(early_stop_warmup_steps),
             min_delta=float(early_stop_min_delta),
         )
+        self._save_model_checkpoints = bool(save_model_checkpoints)
 
     def _compute_split_metrics(self) -> Dict[str, Dict[str, float]]:
         if self.pool.size == 0:
@@ -500,6 +502,7 @@ class CustomCallback(BaseCallback):
             self._last_pool_checkpoint_step = self.num_timesteps
             pool_saved = True
         if (
+            self._save_model_checkpoints and
             self.num_timesteps >= self._model_checkpoint_start_step and
             self.num_timesteps != self._last_model_checkpoint_step
         ):
@@ -636,6 +639,8 @@ def run_single_experiment(
     early_stop_patience: int = 0,
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
+    output_dir: Optional[str] = None,
+    save_model_checkpoints: bool = True,
 ) -> str:
     reseed_everything(seed)
     if segment_names is None:
@@ -678,7 +683,10 @@ def run_single_experiment(
         "rl" if not use_llm else
         f"llm_d{drop_rl_n}")
     name_prefix = f"{instruments}_{pool_capacity}_{seed}_{timestamp}_{tag}"
-    save_path = os.path.join("./out/results", name_prefix)
+    if output_dir is None:
+        save_path = os.path.join("./out/results", name_prefix)
+    else:
+        save_path = output_dir
     os.makedirs(save_path, exist_ok=True)
     _write_json(
         os.path.join(save_path, "run_config.json"),
@@ -710,6 +718,7 @@ def run_single_experiment(
             "early_stop_patience": int(early_stop_patience),
             "early_stop_warmup_steps": int(early_stop_warmup_steps),
             "early_stop_min_delta": float(early_stop_min_delta),
+            "save_model_checkpoints": bool(save_model_checkpoints),
         },
     )
     _write_json(
@@ -786,6 +795,7 @@ def run_single_experiment(
         early_stop_patience=early_stop_patience,
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
+        save_model_checkpoints=save_model_checkpoints,
     )
     model = MaskablePPO(
         "MlpPolicy",
