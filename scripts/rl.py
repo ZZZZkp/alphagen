@@ -642,6 +642,7 @@ def run_single_experiment(
     output_dir: Optional[str] = None,
     save_model_checkpoints: bool = True,
     ic_mut_threshold: float = 0.99,
+    complexity_penalty: float = 0.0,
 ) -> str:
     reseed_everything(seed)
     if segment_names is None:
@@ -721,6 +722,7 @@ def run_single_experiment(
             "early_stop_min_delta": float(early_stop_min_delta),
             "save_model_checkpoints": bool(save_model_checkpoints),
             "ic_mut_threshold": float(ic_mut_threshold),
+            "complexity_penalty": float(complexity_penalty),
         },
     )
     _write_json(
@@ -782,7 +784,8 @@ def run_single_experiment(
     env = AlphaEnv(
         pool=pool,
         device=device,
-        print_expr=print_expr
+        print_expr=print_expr,
+        complexity_penalty=complexity_penalty,
     )
     checkpoint_callback = CustomCallback(
         save_path=save_path,
@@ -858,6 +861,7 @@ def main(
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
     ic_mut_threshold: float = 0.99,
+    complexity_penalty: float = 0.0,
 ):
     """
     :param random_seeds: Random seeds
@@ -939,6 +943,7 @@ def main(
             early_stop_warmup_steps=early_stop_warmup_steps,
             early_stop_min_delta=early_stop_min_delta,
             ic_mut_threshold=ic_mut_threshold,
+            complexity_penalty=complexity_penalty,
         )
 
 
@@ -969,6 +974,7 @@ def local(
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
     ic_mut_threshold: float = 0.99,
+    complexity_penalty: float = 0.0,
 ):
     return main(
         random_seeds=random_seeds,
@@ -998,6 +1004,7 @@ def local(
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
         ic_mut_threshold=ic_mut_threshold,
+        complexity_penalty=complexity_penalty,
     )
 
 
@@ -1028,6 +1035,7 @@ def local_smoke(
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
     ic_mut_threshold: float = 0.99,
+    complexity_penalty: float = 0.0,
 ):
     return main(
         random_seeds=random_seeds,
@@ -1057,6 +1065,7 @@ def local_smoke(
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
         ic_mut_threshold=ic_mut_threshold,
+        complexity_penalty=complexity_penalty,
     )
 
 
@@ -1087,6 +1096,7 @@ def colab(
     early_stop_warmup_steps: int = 20_000,
     early_stop_min_delta: float = 1e-3,
     ic_mut_threshold: float = 0.99,
+    complexity_penalty: float = 0.0,
 ):
     return main(
         random_seeds=random_seeds,
@@ -1116,6 +1126,7 @@ def colab(
         early_stop_warmup_steps=early_stop_warmup_steps,
         early_stop_min_delta=early_stop_min_delta,
         ic_mut_threshold=ic_mut_threshold,
+        complexity_penalty=complexity_penalty,
     )
 
 

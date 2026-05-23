@@ -21,13 +21,15 @@ class AlphaEnvCore(gym.Env):
         self,
         pool: AlphaPoolBase,
         device: torch.device = torch.device('cuda:0'),
-        print_expr: bool = False
+        print_expr: bool = False,
+        complexity_penalty: float = 0.0,
     ):
         super().__init__()
 
         self.pool = pool
         self._print_expr = print_expr
         self._device = device
+        self._complexity_penalty = float(complexity_penalty)
 
         self.eval_cnt = 0
 
@@ -48,7 +50,7 @@ class AlphaEnvCore(gym.Env):
     def step(self, action: Token) -> Tuple[List[Token], float, bool, bool, dict]:
         if (isinstance(action, SequenceIndicatorToken) and
                 action.indicator == SequenceIndicatorType.SEP):
-            reward = self._evaluate()
+            reward = self._evaluate_with_penalty()
             done = True
         elif len(self._tokens) < MAX_EXPR_LENGTH:
             self._tokens.append(action)
@@ -57,12 +59,18 @@ class AlphaEnvCore(gym.Env):
             reward = 0.0
         else:
             done = True
-            reward = self._evaluate() if self._builder.is_valid() else -1.
+            reward = self._evaluate_with_penalty() if self._builder.is_valid() else -1.
 
         if math.isnan(reward):
             reward = 0.
 
         return self._tokens, reward, done, False, self._valid_action_types()
+
+    def _evaluate_with_penalty(self) -> float:
+        base = self._evaluate()
+        if self._complexity_penalty == 0.0:
+            return base
+        return base - self._complexity_penalty * (len(self._tokens) / MAX_EXPR_LENGTH)
 
     def _evaluate(self):
         expr: Expression = self._builder.get_tree()
