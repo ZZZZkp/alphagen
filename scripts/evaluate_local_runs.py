@@ -19,7 +19,7 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import torch
@@ -56,10 +56,10 @@ US_FEATURES = [
 US_DELTA_TIMES = [1, 5, 10, 20, 40, 60]
 
 
-def _patch_us_runtime() -> None:
-    """Match the notebook DELTA_TIMES so any vocabulary-dependent code paths agree."""
-    config_module.DELTA_TIMES = list(US_DELTA_TIMES)
-    env_wrapper_module.DELTA_TIMES = list(US_DELTA_TIMES)
+def _patch_runtime(delta_times: List[int]) -> None:
+    """Override DELTA_TIMES so any vocabulary-dependent code paths agree with the run."""
+    config_module.DELTA_TIMES = list(delta_times)
+    env_wrapper_module.DELTA_TIMES = list(delta_times)
 
 
 def _pick_device() -> torch.device:
@@ -110,6 +110,7 @@ def _build_split_calculators(
     seg_tuple: Tuple[Tuple[str, str], ...],
     instrument: str,
     device: torch.device,
+    features: List["FeatureType"],
 ) -> Dict[str, CachingCalculator]:
     names = ("train", "valid", "test")
     close = Feature(FeatureType.CLOSE)
@@ -121,50 +122,50 @@ def _build_split_calculators(
             start_time=start,
             end_time=end,
             device=device,
-            features=list(US_FEATURES),
+            features=list(features),
         )
         calculators[name] = CachingCalculator(data, target)
         print(f"  loaded {name}: {start} -> {end}  n_days={data.n_days} n_stocks={data.n_stocks}")
     return calculators
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--runs_dir", default="notebooks/runs")
-    parser.add_argument("--qlib_data", default="qlib_data/us_data")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-evaluate even if best_segment_metrics.csv already exists in a run dir.",
-    )
-    parser.add_argument(
-        "--only",
-        default="",
-        help="Substring filter on run dir name (eval just the matching subset).",
-    )
-    args = parser.parse_args()
+def evaluate_runs(
+    runs_dir: Path,
+    qlib_data: Path,
+    region: str = "us",
+    features: Optional[List["FeatureType"]] = None,
+    delta_times: Optional[List[int]] = None,
+    only: str = "",
+    force: bool = False,
+) -> None:
+    """Re-evaluate every run under `runs_dir` against `qlib_data` and write aggregate CSVs.
 
-    runs_root = Path(args.runs_dir).resolve()
-    qlib_path = Path(args.qlib_data).resolve()
-    if not runs_root.exists():
-        raise SystemExit(f"runs_dir not found: {runs_root}")
+    Mirrors what `main()` used to do, but is callable from Python (e.g. from the sweep runner).
+    """
+    runs_dir = Path(runs_dir).resolve()
+    qlib_path = Path(qlib_data).resolve()
+    if not runs_dir.exists():
+        raise SystemExit(f"runs_dir not found: {runs_dir}")
     if not qlib_path.exists():
         raise SystemExit(f"qlib_data not found: {qlib_path}")
 
-    _patch_us_runtime()
+    feature_list = list(features) if features is not None else list(US_FEATURES)
+    delta_list = list(delta_times) if delta_times is not None else list(US_DELTA_TIMES)
+
+    _patch_runtime(delta_list)
     device = _pick_device()
     print(f"Device: {device}")
     print(f"Qlib data: {qlib_path}")
-    print(f"Runs root: {runs_root}")
+    print(f"Runs root: {runs_dir}")
 
-    initialize_qlib(str(qlib_path), region="us")
+    initialize_qlib(str(qlib_path), region=region)
 
     run_dirs: List[Path] = sorted(
-        d for d in runs_root.iterdir()
+        d for d in runs_dir.iterdir()
         if d.is_dir() and d.name != "aggregate" and any(d.glob("*_steps_pool.json"))
     )
-    if args.only:
-        run_dirs = [d for d in run_dirs if args.only in d.name]
+    if only:
+        run_dirs = [d for d in run_dirs if only in d.name]
     print(f"Discovered {len(run_dirs)} run dirs.")
 
     calculators_cache: Dict[Tuple[Tuple[str, str], ...], Dict[str, CachingCalculator]] = {}
@@ -181,11 +182,13 @@ def main() -> None:
 
         if seg_tuple not in calculators_cache:
             print(f"\n[{i}/{len(run_dirs)}] Building calculators for new segment set:")
-            calculators_cache[seg_tuple] = _build_split_calculators(seg_tuple, instrument, device)
+            calculators_cache[seg_tuple] = _build_split_calculators(
+                seg_tuple, instrument, device, feature_list
+            )
         split_calcs = calculators_cache[seg_tuple]
 
         best_csv = run_dir / "best_segment_metrics.csv"
-        if best_csv.exists() and not args.force:
+        if best_csv.exists() and not force:
             print(f"[{i}/{len(run_dirs)}] skip (cached): {run_dir.name}")
             best_df = pd.read_csv(best_csv)
             best_segment_frames.append(best_df)
@@ -288,7 +291,7 @@ def main() -> None:
     else:
         agg = pd.DataFrame()
 
-    out_dir = runs_root / "aggregate"
+    out_dir = runs_dir / "aggregate"
     out_dir.mkdir(parents=True, exist_ok=True)
     seed_summary_df.to_csv(out_dir / "seed_summary.csv", index=False)
     best_all_df.to_csv(out_dir / "best_segment_metrics_all.csv", index=False)
@@ -298,6 +301,34 @@ def main() -> None:
     print(f"  {out_dir / 'seed_summary.csv'}")
     print(f"  {out_dir / 'best_segment_metrics_all.csv'}")
     print(f"  {out_dir / 'best_checkpoint_metrics.csv'}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runs_dir", default="notebooks/runs")
+    parser.add_argument("--qlib_data", default="qlib_data/us_data")
+    parser.add_argument("--region", default="us")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-evaluate even if best_segment_metrics.csv already exists in a run dir.",
+    )
+    parser.add_argument(
+        "--only",
+        default="",
+        help="Substring filter on run dir name (eval just the matching subset).",
+    )
+    args = parser.parse_args()
+
+    evaluate_runs(
+        runs_dir=Path(args.runs_dir),
+        qlib_data=Path(args.qlib_data),
+        region=args.region,
+        features=US_FEATURES,
+        delta_times=US_DELTA_TIMES,
+        only=args.only,
+        force=args.force,
+    )
 
 
 if __name__ == "__main__":
